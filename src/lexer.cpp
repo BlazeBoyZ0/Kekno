@@ -12,6 +12,12 @@ char Lexer::advance() {
     return source[current++];
 }
 
+bool Lexer::match(char expected) {
+    if (peek() != expected) return false;
+    current++;
+    return true;
+}
+
 void Lexer::skipWhitespace() {
     while (current < source.length() && std::isspace(peek())) {
         advance();
@@ -28,10 +34,25 @@ Token Lexer::nextToken() {
         case '-': return {TokenType::MINUS, "-", 0.0, ""};
         case '*': return {TokenType::STAR, "*", 0.0, ""};
         case '/': return {TokenType::SLASH, "/", 0.0, ""};
-        case '=': return {TokenType::EQUAL, "=", 0.0, ""};
+        case '%': return {TokenType::PERCENT, "%", 0.0, ""};
+        case '^': return {TokenType::CARET, "^", 0.0, ""};
         case '(': return {TokenType::LPAREN, "(", 0.0, ""};
         case ')': return {TokenType::RPAREN, ")", 0.0, ""};
+        case '{': return {TokenType::LBRACE, "{", 0.0, ""};
+        case '}': return {TokenType::RBRACE, "}", 0.0, ""};
         case '~': return {TokenType::TILDE, "~", 0.0, ""};
+        case '=':
+            if (match('=')) return {TokenType::EQUAL_EQUAL, "==", 0.0, ""};
+            return {TokenType::EQUAL, "=", 0.0, ""};
+        case '!':
+            if (match('=')) return {TokenType::BANG_EQUAL, "!=", 0.0, ""};
+            return {TokenType::BANG, "!", 0.0, ""};
+        case '<':
+            if (match('=')) return {TokenType::LESS_EQUAL, "<=", 0.0, ""};
+            return {TokenType::LESS, "<", 0.0, ""};
+        case '>':
+            if (match('=')) return {TokenType::GREATER_EQUAL, ">=", 0.0, ""};
+            return {TokenType::GREATER, ">", 0.0, ""};
     }
 
     if (c == '"' || c == '\'') {
@@ -57,6 +78,15 @@ Token Lexer::nextToken() {
         std::string ident = source.substr(start, current - start);
         if (ident == "print") return {TokenType::PRINT, ident, 0.0, ""};
         if (ident == "let") return {TokenType::LET, ident, 0.0, ""};
+        if (ident == "true") return {TokenType::TRUE, ident, 0.0, ""};
+        if (ident == "false") return {TokenType::FALSE, ident, 0.0, ""};
+        if (ident == "nil") return {TokenType::NIL, ident, 0.0, ""};
+        if (ident == "and") return {TokenType::AND, ident, 0.0, ""};
+        if (ident == "or") return {TokenType::OR, ident, 0.0, ""};
+        if (ident == "not") return {TokenType::NOT, ident, 0.0, ""};
+        if (ident == "if") return {TokenType::IF, ident, 0.0, ""};
+        if (ident == "else") return {TokenType::ELSE, ident, 0.0, ""};
+        if (ident == "while") return {TokenType::WHILE, ident, 0.0, ""};
         return {TokenType::IDENTIFIER, ident, 0.0, ""};
     }
 
