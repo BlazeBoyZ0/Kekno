@@ -18,15 +18,47 @@ Value VM::peek(int distance) {
     return stack[stack.size() - 1 - distance];
 }
 
-void VM::run(Chunk& chunk) {
-    const uint8_t* ip = chunk.code.data();
+bool VM::call(FunctionPtr function, int argCount) {
+    if (argCount != function->arity) {
+        std::cout << "[Runtime Error]: Expected " << function->arity << " arguments but got " << argCount << "." << std::endl;
+        return false;
+    }
+    if (frames.size() >= 256) {
+        std::cout << "[Runtime Error]: Stack overflow." << std::endl;
+        return false;
+    }
+    CallFrame frame;
+    frame.function = function;
+    frame.ip = function->chunk.code.data();
+    frame.slotsOffset = stack.size() - argCount - 1;
+    frames.push_back(frame);
+    return true;
+}
+
+VM::VM() {
+    globals["len"] = Value(std::string("len"));
+}
+
+void VM::run(Chunk& mainChunk) {
+    FunctionPtr mainFn = std::make_shared<ObjFunction>();
+    mainFn->chunk = mainChunk;
+    mainFn->name = "main";
+    mainFn->arity = 0;
+
+    frames.clear();
+    stack.clear();
+
+    push(Value(mainFn));
+    call(mainFn, 0);
+
+    CallFrame* frame = &frames.back();
 
     while (true) {
-        OpCode instruction = static_cast<OpCode>(*ip++);
+        OpCode instruction = static_cast<OpCode>(*frame->ip++);
         switch (instruction) {
             case OpCode::OP_CONSTANT: {
-                uint8_t index = *ip++;
-                push(chunk.constants[index]);
+                uint8_t index = *frame->ip++;
+                push(frame->function->chunk.constants[index]);
                 break;
             }
             case OpCode::OP_NIL: {
@@ -42,14 +74,14 @@ void VM::run(Chunk& chunk) {
                 break;
             }
             case OpCode::OP_DEFINE_GLOBAL: {
-                uint8_t index = *ip++;
-                std::string name = chunk.constants[index].str;
+                uint8_t index = *frame->ip++;
+                std::string name = frame->function->chunk.constants[index].str;
                 globals[name] = pop();
                 break;
             }
             case OpCode::OP_GET_GLOBAL: {
-                uint8_t index = *ip++;
-                std::string name = chunk.constants[index].str;
+                uint8_t index = *frame->ip++;
+                std::string name = frame->function->chunk.constants[index].str;
                 auto it = globals.find(name);
                 if (it == globals.end()) {
                     std::cout << "[Runtime Error]: Undefined variable '" << name << "'" << std::endl;
@@ -59,14 +91,128 @@ void VM::run(Chunk& chunk) {
                 break;
             }
             case OpCode::OP_SET_GLOBAL: {
-                uint8_t index = *ip++;
-                std::string name = chunk.constants[index].str;
+                uint8_t index = *frame->ip++;
+                std::string name = frame->function->chunk.constants[index].str;
                 auto it = globals.find(name);
                 if (it == globals.end()) {
                     std::cout << "[Runtime Error]: Variable '" << name << "' is not defined." << std::endl;
                     return;
                 }
-                it->second = pop();
+                it->second = peek(0);
+                break;
+            }
+            case OpCode::OP_GET_LOCAL: {
+                uint8_t slot = *frame->ip++;
+                push(stack[frame->slotsOffset + slot]);
+                break;
+            }
+            case OpCode::OP_SET_LOCAL: {
+                uint8_t slot = *frame->ip++;
+                stack[frame->slotsOffset + slot] = peek(0);
+                break;
+            }
+            case OpCode::OP_CALL: {
+                uint8_t argCount = *frame->ip++;
+                Value callee = peek(argCount);
+                if (callee.isFunction()) {
+                    if (!call(callee.function, argCount)) {
+                        return;
+                    }
+                    frame = &frames.back();
+                } else if (callee.isString() && callee.str == "len") { // native function len check if bound as function
+                    // check if len was called as len(arr)
+                    if (argCount != 1) {
+                        std::cout << "[Runtime Error]: len() expects exactly 1 argument." << std::endl;
+                        return;
+                    }
+                    Value arg = pop(); // pop arg
+                    pop(); // pop callee
+                    if (arg.isArray()) {
+                        push(Value(static_cast<double>(arg.array ? arg.array->size() : 0)));
+                    } else if (arg.isString()) {
+                        push(Value(static_cast<double>(arg.str.length())));
+                    } else {
+                        std::cout << "[Runtime Error]: len() expects string or array argument." << std::endl;
+                        return;
+                    }
+                } else {
+                    // Check if it is native function len stored in global or local
+                    std::cout << "[Runtime Error]: Can only call functions." << std::endl;
+                    return;
+                }
+                break;
+            }
+            case OpCode::OP_BUILD_ARRAY: {
+                uint8_t elementCount = *frame->ip++;
+                ArrayPtr arr = std::make_shared<std::vector<Value>>();
+                arr->resize(elementCount);
+                for (int i = elementCount - 1; i >= 0; --i) {
+                    (*arr)[i] = pop();
+                }
+                push(Value(arr));
+                break;
+            }
+            case OpCode::OP_GET_INDEX: {
+                Value indexVal = pop();
+                Value target = pop();
+
+                if (!indexVal.isNumber()) {
+                    std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
+                    return;
+                }
+
+                int index = static_cast<int>(indexVal.num);
+                if (indexVal.num != index) {
+                    std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
+                    return;
+                }
+
+                if (target.isArray()) {
+                    if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
+                        std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
+                        return;
+                    }
+                    push((*target.array)[index]);
+                } else if (target.isString()) {
+                    if (index < 0 || index >= static_cast<int>(target.str.length())) {
+                        std::cout << "[Runtime Error]: String index " << index << " out of bounds." << std::endl;
+                        return;
+                    }
+                    push(Value(std::string(1, target.str[index])));
+                } else {
+                    std::cout << "[Runtime Error]: Only arrays and strings can be indexed." << std::endl;
+                    return;
+                }
+                break;
+            }
+            case OpCode::OP_SET_INDEX: {
+                Value val = pop();
+                Value indexVal = pop();
+                Value target = pop();
+
+                if (!target.isArray()) {
+                    std::cout << "[Runtime Error]: Only arrays support index assignment." << std::endl;
+                    return;
+                }
+
+                if (!indexVal.isNumber()) {
+                    std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
+                    return;
+                }
+
+                int index = static_cast<int>(indexVal.num);
+                if (indexVal.num != index) {
+                    std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
+                    return;
+                }
+
+                if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
+                    std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
+                    return;
+                }
+
+                (*target.array)[index] = val;
+                push(val);
                 break;
             }
             case OpCode::OP_EQUAL: {
@@ -172,22 +318,22 @@ void VM::run(Chunk& chunk) {
                 break;
             }
             case OpCode::OP_JUMP: {
-                uint16_t offset = (static_cast<uint16_t>(ip[0]) << 8) | ip[1];
-                ip += 2 + offset;
+                uint16_t offset = (static_cast<uint16_t>(frame->ip[0]) << 8) | frame->ip[1];
+                frame->ip += 2 + offset;
                 break;
             }
             case OpCode::OP_JUMP_IF_FALSE: {
-                uint16_t offset = (static_cast<uint16_t>(ip[0]) << 8) | ip[1];
-                ip += 2;
+                uint16_t offset = (static_cast<uint16_t>(frame->ip[0]) << 8) | frame->ip[1];
+                frame->ip += 2;
                 if (peek(0).isFalsey()) {
-                    ip += offset;
+                    frame->ip += offset;
                 }
                 break;
             }
             case OpCode::OP_LOOP: {
-                uint16_t offset = (static_cast<uint16_t>(ip[0]) << 8) | ip[1];
-                ip += 2;
-                ip -= offset;
+                uint16_t offset = (static_cast<uint16_t>(frame->ip[0]) << 8) | frame->ip[1];
+                frame->ip += 2;
+                frame->ip -= offset;
                 break;
             }
             case OpCode::OP_PRINT: {
@@ -200,7 +346,17 @@ void VM::run(Chunk& chunk) {
                 break;
             }
             case OpCode::OP_RETURN: {
-                return;
+                Value result = pop();
+                size_t slotsOffset = frame->slotsOffset;
+                frames.pop_back();
+                if (frames.empty()) {
+                    pop(); // pop main function
+                    return;
+                }
+                stack.resize(slotsOffset);
+                push(result);
+                frame = &frames.back();
+                break;
             }
         }
     }

@@ -40,6 +40,9 @@ Token Lexer::nextToken() {
         case ')': return {TokenType::RPAREN, ")", 0.0, ""};
         case '{': return {TokenType::LBRACE, "{", 0.0, ""};
         case '}': return {TokenType::RBRACE, "}", 0.0, ""};
+        case '[': return {TokenType::LBRACKET, "[", 0.0, ""};
+        case ']': return {TokenType::RBRACKET, "]", 0.0, ""};
+        case ',': return {TokenType::COMMA, ",", 0.0, ""};
         case '~': return {TokenType::TILDE, "~", 0.0, ""};
         case '=':
             if (match('=')) return {TokenType::EQUAL_EQUAL, "==", 0.0, ""};
@@ -87,6 +90,8 @@ Token Lexer::nextToken() {
         if (ident == "if") return {TokenType::IF, ident, 0.0, ""};
         if (ident == "else") return {TokenType::ELSE, ident, 0.0, ""};
         if (ident == "while") return {TokenType::WHILE, ident, 0.0, ""};
+        if (ident == "fn") return {TokenType::FN, ident, 0.0, ""};
+        if (ident == "return") return {TokenType::RETURN, ident, 0.0, ""};
         return {TokenType::IDENTIFIER, ident, 0.0, ""};
     }
 

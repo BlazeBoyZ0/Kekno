@@ -1,4 +1,5 @@
 #include "chunk.h"
+#include "value.h"
 
 void Chunk::writeByte(uint8_t byte) {
     code.push_back(byte);
