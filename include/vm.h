@@ -11,6 +11,7 @@ private:
 
     void push(Value value);
     Value pop();
+    Value peek(int distance);
 
 public:
     void run(Chunk& chunk);

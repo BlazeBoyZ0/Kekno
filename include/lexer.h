@@ -9,6 +9,7 @@ private:
 
     char peek();
     char advance();
+    bool match(char expected);
     void skipWhitespace();
 
 public:
