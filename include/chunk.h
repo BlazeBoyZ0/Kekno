@@ -1,8 +1,9 @@
 #pragma once
 #include <vector>
 #include <cstdint>
-#include "value.h"
 #include "opcode.h"
+
+struct Value;
 
 struct Chunk {
     std::vector<uint8_t> code;
