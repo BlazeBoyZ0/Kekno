@@ -79,7 +79,7 @@ Token Lexer::nextToken() {
         size_t start = current - 1;
         while (std::isalnum(peek()) || peek() == '_') advance();
         std::string ident = source.substr(start, current - start);
-        if (ident == "print") return {TokenType::PRINT, ident, 0.0, ""};
+        if (ident == "echo") return {TokenType::ECHO, ident, 0.0, ""};
         if (ident == "let") return {TokenType::LET, ident, 0.0, ""};
         if (ident == "true") return {TokenType::TRUE, ident, 0.0, ""};
         if (ident == "false") return {TokenType::FALSE, ident, 0.0, ""};
@@ -90,8 +90,8 @@ Token Lexer::nextToken() {
         if (ident == "if") return {TokenType::IF, ident, 0.0, ""};
         if (ident == "else") return {TokenType::ELSE, ident, 0.0, ""};
         if (ident == "while") return {TokenType::WHILE, ident, 0.0, ""};
-        if (ident == "fn") return {TokenType::FN, ident, 0.0, ""};
-        if (ident == "return") return {TokenType::RETURN, ident, 0.0, ""};
+        if (ident == "task") return {TokenType::TASK, ident, 0.0, ""};
+        if (ident == "give") return {TokenType::GIVE, ident, 0.0, ""};
         return {TokenType::IDENTIFIER, ident, 0.0, ""};
     }
 

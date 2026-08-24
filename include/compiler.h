@@ -69,8 +69,8 @@ private:
     void expression();
 
     void varDeclaration();
-    void fnDeclaration();
-    void returnStatement();
+    void taskDeclaration();
+    void giveStatement();
     void blockStatement();
     void ifStatement();
     void whileStatement();
