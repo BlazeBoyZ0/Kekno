@@ -1,6 +1,9 @@
 #include "vm.h"
 #include <iostream>
 #include <cmath>
+#include <chrono>
+#include <random>
+#include <stdexcept>
 
 void VM::push(Value value) {
     stack.push_back(value);
@@ -36,7 +39,95 @@ bool VM::call(FunctionPtr function, int argCount) {
 }
 
 VM::VM() {
-    globals["len"] = Value(std::string("len"));
+    globals["size"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: size() expects 1 argument.");
+        if (args[0].isArray()) {
+            return Value(static_cast<double>(args[0].array ? args[0].array->size() : 0));
+        } else if (args[0].isString()) {
+            return Value(static_cast<double>(args[0].str.length()));
+        }
+        throw std::runtime_error("[Runtime Error]: size() expects array or string argument.");
+    }));
+
+    globals["inject"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: inject() expects 2 arguments.");
+        if (!args[0].isArray() || !args[0].array) {
+            throw std::runtime_error("[Runtime Error]: inject() expects array as first argument.");
+        }
+        args[0].array->push_back(args[1]);
+        return Value();
+    }));
+
+    globals["expel"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: expel() expects 1 argument.");
+        if (!args[0].isArray() || !args[0].array) {
+            throw std::runtime_error("[Runtime Error]: expel() expects array argument.");
+        }
+        if (args[0].array->empty()) {
+            throw std::runtime_error("[Runtime Error]: Cannot expel from empty array.");
+        }
+        Value last = args[0].array->back();
+        args[0].array->pop_back();
+        return last;
+    }));
+
+    globals["read"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: read() expects 1 argument.");
+        std::cout << args[0].toString();
+        std::cout.flush();
+        std::string input;
+        std::getline(std::cin, input);
+        return Value(input);
+    }));
+
+    globals["scan"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: scan() expects 1 argument.");
+        switch (args[0].type) {
+            case ValueType::NUMBER: return Value(std::string("number"));
+            case ValueType::STRING: return Value(std::string("string"));
+            case ValueType::BOOL: return Value(std::string("bool"));
+            case ValueType::ARRAY: return Value(std::string("array"));
+            case ValueType::FUNCTION:
+            case ValueType::NATIVE: return Value(std::string("task"));
+            case ValueType::NIL: return Value(std::string("nil"));
+        }
+        return Value(std::string("nil"));
+    }));
+
+    globals["cast_num"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_num() expects 1 argument.");
+        if (args[0].isNumber()) return args[0];
+        if (args[0].isBool()) return Value(args[0].boolean ? 1.0 : 0.0);
+        if (args[0].isString()) {
+            if (args[0].str.empty()) throw std::runtime_error("[Runtime Error]: Cannot cast empty string to number.");
+            size_t pos = 0;
+            try {
+                double val = std::stod(args[0].str, &pos);
+                if (pos == args[0].str.length()) return Value(val);
+            } catch (...) {}
+            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + args[0].str + "' to number.");
+        }
+        throw std::runtime_error("[Runtime Error]: Cannot cast value to number.");
+    }));
+
+    globals["cast_str"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_str() expects 1 argument.");
+        return Value(args[0].toString());
+    }));
+
+    globals["clock"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 0) throw std::runtime_error("[Runtime Error]: clock() expects 0 arguments.");
+        auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
+        double seconds = std::chrono::duration<double>(now).count();
+        return Value(seconds);
+    }));
+
+    globals["rand"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 0) throw std::runtime_error("[Runtime Error]: rand() expects 0 arguments.");
+        static std::mt19937 rng(std::random_device{}());
+        static std::uniform_real_distribution<double> dist(0.0, 1.0);
+        return Value(dist(rng));
+    }));
 }
 
 void VM::run(Chunk& mainChunk) {
@@ -119,24 +210,17 @@ void VM::run(Chunk& mainChunk) {
                         return;
                     }
                     frame = &frames.back();
-                } else if (callee.isString() && callee.str == "len") { // native function len check if bound as function
-                    // check if len was called as len(arr)
-                    if (argCount != 1) {
-                        std::cout << "[Runtime Error]: len() expects exactly 1 argument." << std::endl;
-                        return;
-                    }
-                    Value arg = pop(); // pop arg
-                    pop(); // pop callee
-                    if (arg.isArray()) {
-                        push(Value(static_cast<double>(arg.array ? arg.array->size() : 0)));
-                    } else if (arg.isString()) {
-                        push(Value(static_cast<double>(arg.str.length())));
-                    } else {
-                        std::cout << "[Runtime Error]: len() expects string or array argument." << std::endl;
+                } else if (callee.isNative()) {
+                    try {
+                        Value* args = &stack[stack.size() - argCount];
+                        Value result = callee.nativeFn(argCount, args);
+                        stack.resize(stack.size() - argCount - 1);
+                        push(result);
+                    } catch (const std::exception& ex) {
+                        std::cout << ex.what() << std::endl;
                         return;
                     }
                 } else {
-                    // Check if it is native function len stored in global or local
                     std::cout << "[Runtime Error]: Can only call functions." << std::endl;
                     return;
                 }

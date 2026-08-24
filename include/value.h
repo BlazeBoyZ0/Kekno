@@ -3,11 +3,14 @@
 #include <sstream>
 #include <vector>
 #include <memory>
+#include <functional>
 #include "chunk.h"
 
-enum class ValueType { NUMBER, STRING, BOOL, NIL, FUNCTION, ARRAY };
+enum class ValueType { NUMBER, STRING, BOOL, NIL, FUNCTION, ARRAY, NATIVE };
 
 struct Value;
+
+using NativeFn = std::function<Value(int argCount, Value* args)>;
 
 struct ObjFunction {
     int arity = 0;
@@ -25,13 +28,15 @@ struct Value {
     bool boolean;
     FunctionPtr function;
     ArrayPtr array;
+    NativeFn nativeFn;
 
-    Value() : type(ValueType::NIL), num(0.0), str(""), boolean(false), function(nullptr), array(nullptr) {}
-    Value(double n) : type(ValueType::NUMBER), num(n), str(""), boolean(false), function(nullptr), array(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), num(0.0), str(s), boolean(false), function(nullptr), array(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), num(0.0), str(""), boolean(b), function(nullptr), array(nullptr) {}
-    Value(FunctionPtr fn) : type(ValueType::FUNCTION), num(0.0), str(""), boolean(false), function(fn), array(nullptr) {}
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), num(0.0), str(""), boolean(false), function(nullptr), array(arr) {}
+    Value() : type(ValueType::NIL), num(0.0), str(""), boolean(false), function(nullptr), array(nullptr), nativeFn(nullptr) {}
+    Value(double n) : type(ValueType::NUMBER), num(n), str(""), boolean(false), function(nullptr), array(nullptr), nativeFn(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), num(0.0), str(s), boolean(false), function(nullptr), array(nullptr), nativeFn(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), num(0.0), str(""), boolean(b), function(nullptr), array(nullptr), nativeFn(nullptr) {}
+    Value(FunctionPtr fn) : type(ValueType::FUNCTION), num(0.0), str(""), boolean(false), function(fn), array(nullptr), nativeFn(nullptr) {}
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), num(0.0), str(""), boolean(false), function(nullptr), array(arr), nativeFn(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), num(0.0), str(""), boolean(false), function(nullptr), array(nullptr), nativeFn(nfn) {}
 
     bool isNumber() const { return type == ValueType::NUMBER; }
     bool isString() const { return type == ValueType::STRING; }
@@ -39,6 +44,7 @@ struct Value {
     bool isNil() const { return type == ValueType::NIL; }
     bool isFunction() const { return type == ValueType::FUNCTION; }
     bool isArray() const { return type == ValueType::ARRAY; }
+    bool isNative() const { return type == ValueType::NATIVE; }
 
     bool isFalsey() const {
         if (isNil()) return true;
@@ -58,6 +64,7 @@ struct Value {
             case ValueType::STRING: return str == other.str;
             case ValueType::FUNCTION: return function == other.function;
             case ValueType::ARRAY: return array == other.array;
+            case ValueType::NATIVE: return false;
         }
         return false;
     }
@@ -66,11 +73,12 @@ struct Value {
         if (isNil()) return "nil";
         if (isBool()) return boolean ? "true" : "false";
         if (isString()) return str;
+        if (isNative()) return "<native task>";
         if (isFunction()) {
             if (function && !function->name.empty()) {
-                return "<fn " + function->name + ">";
+                return "<task " + function->name + ">";
             }
-            return "<fn>";
+            return "<task>";
         }
         if (isArray()) {
             std::string result = "[";

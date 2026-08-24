@@ -339,10 +339,10 @@ void Compiler::varDeclaration() {
     }
 }
 
-void Compiler::fnDeclaration() {
-    advance(); // consume 'fn'
+void Compiler::taskDeclaration() {
+    advance(); // consume 'task'
     if (current.type != TokenType::IDENTIFIER) {
-        std::cout << "[Syntax Error]: Expected function name after 'fn'" << std::endl;
+        std::cout << "[Syntax Error]: Expected task name after 'task'" << std::endl;
         hasError = true;
         return;
     }
@@ -365,7 +365,7 @@ void Compiler::fnDeclaration() {
     CompilerContext* parentContext = currentContext;
     currentContext = &fnContext;
 
-    consume(TokenType::LPAREN, "Expected '(' after function name");
+    consume(TokenType::LPAREN, "Expected '(' after task name");
     if (current.type != TokenType::RPAREN) {
         do {
             fn->arity++;
@@ -383,12 +383,12 @@ void Compiler::fnDeclaration() {
         } while (match(TokenType::COMMA));
     }
     consume(TokenType::RPAREN, "Expected ')' after parameters");
-    consume(TokenType::LBRACE, "Expected '{' before function body");
+    consume(TokenType::LBRACE, "Expected '{' before task body");
 
     while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
         statement();
     }
-    consume(TokenType::RBRACE, "Expected '}' after function body");
+    consume(TokenType::RBRACE, "Expected '}' after task body");
 
     // Default implicit return nil
     chunk().writeOp(OpCode::OP_NIL);
@@ -409,10 +409,10 @@ void Compiler::fnDeclaration() {
     }
 }
 
-void Compiler::returnStatement() {
-    advance(); // consume 'return'
+void Compiler::giveStatement() {
+    advance(); // consume 'give'
     if (currentContext->type == FunctionType::TYPE_SCRIPT) {
-        std::cout << "[Compiler Error]: Cannot return from top-level code." << std::endl;
+        std::cout << "[Compiler Error]: Cannot give from top-level code." << std::endl;
         hasError = true;
         return;
     }
@@ -480,11 +480,11 @@ void Compiler::statement() {
     if (hasError) return;
     if (current.type == TokenType::LET) {
         varDeclaration();
-    } else if (current.type == TokenType::FN) {
-        fnDeclaration();
-    } else if (current.type == TokenType::RETURN) {
-        returnStatement();
-    } else if (current.type == TokenType::PRINT) {
+    } else if (current.type == TokenType::TASK) {
+        taskDeclaration();
+    } else if (current.type == TokenType::GIVE) {
+        giveStatement();
+    } else if (current.type == TokenType::ECHO) {
         advance();
         expression();
         consume(TokenType::TILDE, "Every statement must end with '~'");
