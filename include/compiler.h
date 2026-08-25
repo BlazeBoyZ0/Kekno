@@ -11,6 +11,13 @@ struct Local {
     int depth = 0;
 };
 
+struct Loop {
+    int startIP;
+    int scopeDepth;
+    std::vector<int> breakJumps;
+    Loop* enclosing = nullptr;
+};
+
 enum class FunctionType {
     TYPE_FUNCTION,
     TYPE_SCRIPT
@@ -35,6 +42,7 @@ private:
     Token prev;
     Chunk& targetChunk;
     CompilerContext* currentContext = nullptr;
+    Loop* currentLoop = nullptr;
     bool hasError = false;
 
     Chunk& chunk() { return currentContext->chunk; }
@@ -74,6 +82,9 @@ private:
     void blockStatement();
     void ifStatement();
     void whileStatement();
+    void haltStatement();
+    void skipStatement();
+    void grabStatement();
     void statement();
 
 public:

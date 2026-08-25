@@ -1,9 +1,13 @@
 #include "vm.h"
+#include "compiler.h"
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <cmath>
 #include <chrono>
 #include <random>
 #include <stdexcept>
+#include <algorithm>
 
 void VM::push(Value value) {
     stack.push_back(value);
@@ -45,8 +49,75 @@ VM::VM() {
             return Value(static_cast<double>(args[0].array ? args[0].array->size() : 0));
         } else if (args[0].isString()) {
             return Value(static_cast<double>(args[0].str.length()));
+        } else if (args[0].isMap()) {
+            return Value(static_cast<double>(args[0].map ? args[0].map->table.size() : 0));
         }
-        throw std::runtime_error("[Runtime Error]: size() expects array or string argument.");
+        throw std::runtime_error("[Runtime Error]: size() expects array, map, or string argument.");
+    }));
+
+    globals["keys"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: keys() expects 1 argument.");
+        if (!args[0].isMap() || !args[0].map) {
+            throw std::runtime_error("[Runtime Error]: keys() expects map as argument.");
+        }
+        ArrayPtr arr = std::make_shared<std::vector<Value>>();
+        for (const std::string& key : args[0].map->keys) {
+            arr->push_back(Value(key));
+        }
+        return Value(arr);
+    }));
+
+    globals["values"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: values() expects 1 argument.");
+        if (!args[0].isMap() || !args[0].map) {
+            throw std::runtime_error("[Runtime Error]: values() expects map as argument.");
+        }
+        ArrayPtr arr = std::make_shared<std::vector<Value>>();
+        for (const std::string& key : args[0].map->keys) {
+            auto it = args[0].map->table.find(key);
+            if (it != args[0].map->table.end()) {
+                arr->push_back(it->second);
+            }
+        }
+        return Value(arr);
+    }));
+
+    globals["has"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: has() expects 2 arguments.");
+        if (args[0].isMap() && args[0].map) {
+            if (!args[1].isString()) {
+                throw std::runtime_error("[Runtime Error]: map key must be a string in has().");
+            }
+            return Value(args[0].map->table.find(args[1].str) != args[0].map->table.end());
+        } else if (args[0].isArray() && args[0].array) {
+            for (const Value& elem : *args[0].array) {
+                if (elem.isEqual(args[1])) return Value(true);
+            }
+            return Value(false);
+        }
+        throw std::runtime_error("[Runtime Error]: has() expects map or array as first argument.");
+    }));
+
+    globals["purge"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: purge() expects 2 arguments.");
+        if (args[0].isMap() && args[0].map) {
+            if (!args[1].isString()) {
+                throw std::runtime_error("[Runtime Error]: purge() map key must be a string.");
+            }
+            bool removed = args[0].map->remove(args[1].str);
+            return Value(removed);
+        } else if (args[0].isArray() && args[0].array) {
+            if (!args[1].isNumber()) {
+                throw std::runtime_error("[Runtime Error]: purge() array index must be a number.");
+            }
+            int idx = static_cast<int>(args[1].num);
+            if (args[1].num != idx || idx < 0 || idx >= static_cast<int>(args[0].array->size())) {
+                throw std::runtime_error("[Runtime Error]: purge() array index out of bounds.");
+            }
+            args[0].array->erase(args[0].array->begin() + idx);
+            return Value(true);
+        }
+        throw std::runtime_error("[Runtime Error]: purge() expects map or array as first argument.");
     }));
 
     globals["inject"] = Value(NativeFn([](int argCount, Value* args) -> Value {
@@ -87,6 +158,7 @@ VM::VM() {
             case ValueType::STRING: return Value(std::string("string"));
             case ValueType::BOOL: return Value(std::string("bool"));
             case ValueType::ARRAY: return Value(std::string("array"));
+            case ValueType::MAP: return Value(std::string("map"));
             case ValueType::FUNCTION:
             case ValueType::NATIVE: return Value(std::string("task"));
             case ValueType::NIL: return Value(std::string("nil"));
@@ -127,6 +199,41 @@ VM::VM() {
         static std::mt19937 rng(std::random_device{}());
         static std::uniform_real_distribution<double> dist(0.0, 1.0);
         return Value(dist(rng));
+    }));
+
+    globals["abs"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: abs() expects 1 argument.");
+        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: abs() expects a number.");
+        return Value(std::abs(args[0].num));
+    }));
+
+    globals["floor"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: floor() expects 1 argument.");
+        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: floor() expects a number.");
+        return Value(std::floor(args[0].num));
+    }));
+
+    globals["ceil"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: ceil() expects 1 argument.");
+        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: ceil() expects a number.");
+        return Value(std::ceil(args[0].num));
+    }));
+
+    globals["sqrt"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: sqrt() expects 1 argument.");
+        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: sqrt() expects a number.");
+        return Value(std::sqrt(args[0].num));
+    }));
+
+    globals["clamp"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 3) throw std::runtime_error("[Runtime Error]: clamp() expects 3 arguments.");
+        if (!args[0].isNumber() || !args[1].isNumber() || !args[2].isNumber()) {
+            throw std::runtime_error("[Runtime Error]: clamp() expects numbers.");
+        }
+        double val = args[0].num;
+        double minVal = args[1].num;
+        double maxVal = args[2].num;
+        return Value(std::max(minVal, std::min(val, maxVal)));
     }));
 }
 
@@ -236,35 +343,76 @@ void VM::run(Chunk& mainChunk) {
                 push(Value(arr));
                 break;
             }
+            case OpCode::OP_BUILD_MAP: {
+                uint8_t entryCount = *frame->ip++;
+                MapPtr mapObj = std::make_shared<ObjMap>();
+                std::vector<std::pair<std::string, Value>> entries(entryCount);
+                for (int i = entryCount - 1; i >= 0; --i) {
+                    Value val = pop();
+                    Value keyVal = pop();
+                    if (!keyVal.isString()) {
+                        std::cout << "[Runtime Error]: Map key must be a string." << std::endl;
+                        return;
+                    }
+                    entries[i] = {keyVal.str, val};
+                }
+                for (int i = 0; i < entryCount; ++i) {
+                    mapObj->set(entries[i].first, entries[i].second);
+                }
+                push(Value(mapObj));
+                break;
+            }
             case OpCode::OP_GET_INDEX: {
                 Value indexVal = pop();
                 Value target = pop();
 
-                if (!indexVal.isNumber()) {
-                    std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
-                    return;
-                }
-
-                int index = static_cast<int>(indexVal.num);
-                if (indexVal.num != index) {
-                    std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
-                    return;
-                }
-
-                if (target.isArray()) {
+                if (target.isMap()) {
+                    if (!indexVal.isString()) {
+                        std::cout << "[Runtime Error]: Map key must be a string." << std::endl;
+                        return;
+                    }
+                    if (target.map) {
+                        auto it = target.map->table.find(indexVal.str);
+                        if (it != target.map->table.end()) {
+                            push(it->second);
+                        } else {
+                            push(Value()); // nil if key not found
+                        }
+                    } else {
+                        push(Value());
+                    }
+                } else if (target.isArray()) {
+                    if (!indexVal.isNumber()) {
+                        std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
+                        return;
+                    }
+                    int index = static_cast<int>(indexVal.num);
+                    if (indexVal.num != index) {
+                        std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
+                        return;
+                    }
                     if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
                         std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
                         return;
                     }
                     push((*target.array)[index]);
                 } else if (target.isString()) {
+                    if (!indexVal.isNumber()) {
+                        std::cout << "[Runtime Error]: String index must be a number." << std::endl;
+                        return;
+                    }
+                    int index = static_cast<int>(indexVal.num);
+                    if (indexVal.num != index) {
+                        std::cout << "[Runtime Error]: String index must be an integer." << std::endl;
+                        return;
+                    }
                     if (index < 0 || index >= static_cast<int>(target.str.length())) {
                         std::cout << "[Runtime Error]: String index " << index << " out of bounds." << std::endl;
                         return;
                     }
                     push(Value(std::string(1, target.str[index])));
                 } else {
-                    std::cout << "[Runtime Error]: Only arrays and strings can be indexed." << std::endl;
+                    std::cout << "[Runtime Error]: Only arrays, maps, and strings can be indexed." << std::endl;
                     return;
                 }
                 break;
@@ -274,29 +422,67 @@ void VM::run(Chunk& mainChunk) {
                 Value indexVal = pop();
                 Value target = pop();
 
-                if (!target.isArray()) {
-                    std::cout << "[Runtime Error]: Only arrays support index assignment." << std::endl;
+                if (target.isMap()) {
+                    if (!indexVal.isString()) {
+                        std::cout << "[Runtime Error]: Map key must be a string." << std::endl;
+                        return;
+                    }
+                    if (!target.map) {
+                        std::cout << "[Runtime Error]: Invalid map target." << std::endl;
+                        return;
+                    }
+                    target.map->set(indexVal.str, val);
+                    push(val);
+                } else if (target.isArray()) {
+                    if (!indexVal.isNumber()) {
+                        std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
+                        return;
+                    }
+                    int index = static_cast<int>(indexVal.num);
+                    if (indexVal.num != index) {
+                        std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
+                        return;
+                    }
+                    if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
+                        std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
+                        return;
+                    }
+                    (*target.array)[index] = val;
+                    push(val);
+                } else {
+                    std::cout << "[Runtime Error]: Only arrays and maps support index assignment." << std::endl;
                     return;
                 }
-
-                if (!indexVal.isNumber()) {
-                    std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
+                break;
+            }
+            case OpCode::OP_GRAB: {
+                Value pathVal = pop();
+                if (!pathVal.isString()) {
+                    std::cout << "[Runtime Error]: grab path must be a string." << std::endl;
                     return;
                 }
-
-                int index = static_cast<int>(indexVal.num);
-                if (indexVal.num != index) {
-                    std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
+                std::ifstream file(pathVal.str);
+                if (!file.is_open()) {
+                    std::cout << "[Runtime Error]: Could not open grab file \"" << pathVal.str << "\"." << std::endl;
                     return;
                 }
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                std::string grabSource = buffer.str();
 
-                if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
-                    std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
+                FunctionPtr grabFn = std::make_shared<ObjFunction>();
+                grabFn->name = pathVal.str;
+                grabFn->arity = 0;
+                Compiler compiler(grabSource, grabFn->chunk);
+                if (!compiler.compile()) {
+                    std::cout << "[Runtime Error]: Could not compile grab file \"" << pathVal.str << "\"." << std::endl;
                     return;
                 }
-
-                (*target.array)[index] = val;
-                push(val);
+                push(Value(grabFn));
+                if (!call(grabFn, 0)) {
+                    return;
+                }
+                frame = &frames.back();
                 break;
             }
             case OpCode::OP_EQUAL: {
