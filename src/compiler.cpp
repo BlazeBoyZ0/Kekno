@@ -174,6 +174,24 @@ void Compiler::primary() {
         consume(TokenType::RBRACKET, "Expected ']' after array elements");
         chunk().writeOp(OpCode::OP_BUILD_ARRAY);
         chunk().writeByte(elementCount);
+    } else if (current.type == TokenType::LBRACE) {
+        advance();
+        uint8_t entryCount = 0;
+        if (current.type != TokenType::RBRACE) {
+            do {
+                expression();
+                consume(TokenType::COLON, "Expected ':' after map key");
+                expression();
+                if (entryCount == 255) {
+                    std::cout << "[Compiler Error]: Cannot have more than 255 entries in map literal." << std::endl;
+                    hasError = true;
+                }
+                entryCount++;
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RBRACE, "Expected '}' after map entries");
+        chunk().writeOp(OpCode::OP_BUILD_MAP);
+        chunk().writeByte(entryCount);
     } else {
         std::cout << "[Syntax Error]: Expected expression" << std::endl;
         hasError = true;
@@ -363,7 +381,9 @@ void Compiler::taskDeclaration() {
     fnContext.locals[0].depth = 0;
 
     CompilerContext* parentContext = currentContext;
+    Loop* enclosingLoop = currentLoop;
     currentContext = &fnContext;
+    currentLoop = nullptr;
 
     consume(TokenType::LPAREN, "Expected '(' after task name");
     if (current.type != TokenType::RPAREN) {
@@ -395,6 +415,7 @@ void Compiler::taskDeclaration() {
     chunk().writeOp(OpCode::OP_RETURN);
 
     currentContext = parentContext;
+    currentLoop = enclosingLoop;
 
     uint8_t fnConstantIdx = chunk().addConstant(Value(fn));
     chunk().writeOp(OpCode::OP_CONSTANT);
@@ -459,7 +480,11 @@ void Compiler::ifStatement() {
 
 void Compiler::whileStatement() {
     advance(); // consume 'while'
-    int loopStart = static_cast<int>(chunk().code.size());
+    Loop loop;
+    loop.startIP = static_cast<int>(chunk().code.size());
+    loop.scopeDepth = currentContext->scopeDepth;
+    loop.enclosing = currentLoop;
+    currentLoop = &loop;
 
     consume(TokenType::LPAREN, "Expected '(' after 'while'");
     expression();
@@ -470,9 +495,66 @@ void Compiler::whileStatement() {
 
     statement();
 
-    emitLoop(loopStart);
+    emitLoop(loop.startIP);
 
     patchJump(exitJump);
+    chunk().writeOp(OpCode::OP_POP);
+
+    for (int breakJump : loop.breakJumps) {
+        patchJump(breakJump);
+    }
+
+    currentLoop = loop.enclosing;
+}
+
+void Compiler::haltStatement() {
+    advance(); // consume 'halt'
+    consume(TokenType::TILDE, "Every statement must end with '~'");
+    if (!currentLoop) {
+        std::cout << "[Compiler Error]: Cannot use 'halt' outside of a loop." << std::endl;
+        hasError = true;
+        return;
+    }
+    for (int i = currentContext->localCount - 1; i >= 0; i--) {
+        if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
+            chunk().writeOp(OpCode::OP_POP);
+        } else {
+            break;
+        }
+    }
+    int breakJump = emitJump(OpCode::OP_JUMP);
+    currentLoop->breakJumps.push_back(breakJump);
+}
+
+void Compiler::skipStatement() {
+    advance(); // consume 'skip'
+    consume(TokenType::TILDE, "Every statement must end with '~'");
+    if (!currentLoop) {
+        std::cout << "[Compiler Error]: Cannot use 'skip' outside of a loop." << std::endl;
+        hasError = true;
+        return;
+    }
+    for (int i = currentContext->localCount - 1; i >= 0; i--) {
+        if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
+            chunk().writeOp(OpCode::OP_POP);
+        } else {
+            break;
+        }
+    }
+    emitLoop(currentLoop->startIP);
+}
+
+void Compiler::grabStatement() {
+    advance(); // consume 'grab'
+    if (current.type != TokenType::STRING) {
+        std::cout << "[Syntax Error]: Expected filename string after 'grab'." << std::endl;
+        hasError = true;
+        return;
+    }
+    emitConstant(Value(current.strValue));
+    advance();
+    consume(TokenType::TILDE, "Every statement must end with '~'");
+    chunk().writeOp(OpCode::OP_GRAB);
     chunk().writeOp(OpCode::OP_POP);
 }
 
@@ -484,6 +566,12 @@ void Compiler::statement() {
         taskDeclaration();
     } else if (current.type == TokenType::GIVE) {
         giveStatement();
+    } else if (current.type == TokenType::HALT) {
+        haltStatement();
+    } else if (current.type == TokenType::SKIP) {
+        skipStatement();
+    } else if (current.type == TokenType::GRAB) {
+        grabStatement();
     } else if (current.type == TokenType::ECHO) {
         advance();
         expression();

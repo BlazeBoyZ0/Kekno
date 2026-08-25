@@ -19,8 +19,30 @@ bool Lexer::match(char expected) {
 }
 
 void Lexer::skipWhitespace() {
-    while (current < source.length() && std::isspace(peek())) {
-        advance();
+    while (current < source.length()) {
+        char c = peek();
+        if (std::isspace(c)) {
+            advance();
+        } else if (c == '/' && current + 1 < source.length() && source[current + 1] == '/') {
+            // Single line comment: skip until newline or EOF
+            while (current < source.length() && peek() != '\n') {
+                advance();
+            }
+        } else if (c == '/' && current + 1 < source.length() && source[current + 1] == '*') {
+            // Multi-line comment: skip until */ or EOF
+            advance(); // consume '/'
+            advance(); // consume '*'
+            while (current < source.length()) {
+                if (peek() == '*' && current + 1 < source.length() && source[current + 1] == '/') {
+                    advance(); // consume '*'
+                    advance(); // consume '/'
+                    break;
+                }
+                advance();
+            }
+        } else {
+            break;
+        }
     }
 }
 
@@ -43,6 +65,7 @@ Token Lexer::nextToken() {
         case '[': return {TokenType::LBRACKET, "[", 0.0, ""};
         case ']': return {TokenType::RBRACKET, "]", 0.0, ""};
         case ',': return {TokenType::COMMA, ",", 0.0, ""};
+        case ':': return {TokenType::COLON, ":", 0.0, ""};
         case '~': return {TokenType::TILDE, "~", 0.0, ""};
         case '=':
             if (match('=')) return {TokenType::EQUAL_EQUAL, "==", 0.0, ""};
@@ -92,6 +115,9 @@ Token Lexer::nextToken() {
         if (ident == "while") return {TokenType::WHILE, ident, 0.0, ""};
         if (ident == "task") return {TokenType::TASK, ident, 0.0, ""};
         if (ident == "give") return {TokenType::GIVE, ident, 0.0, ""};
+        if (ident == "halt") return {TokenType::HALT, ident, 0.0, ""};
+        if (ident == "skip") return {TokenType::SKIP, ident, 0.0, ""};
+        if (ident == "grab") return {TokenType::GRAB, ident, 0.0, ""};
         return {TokenType::IDENTIFIER, ident, 0.0, ""};
     }
 
