@@ -9,6 +9,10 @@ Compiler::Compiler(const std::string& src, Chunk& targetChunk)
 void Compiler::advance() {
     prev = current;
     current = lexer.nextToken();
+    if (current.type == TokenType::ERROR) {
+        std::cout << "[Syntax Error]: " << current.text << std::endl;
+        hasError = true;
+    }
 }
 
 bool Compiler::match(TokenType type) {
@@ -23,7 +27,8 @@ void Compiler::consume(TokenType type, const std::string& errMsg) {
     if (current.type == type) {
         advance();
     } else {
-        std::cout << "[Syntax Error]: " << errMsg << " (Found: '" << current.text << "')" << std::endl;
+        std::string found = (current.type == TokenType::END_OF_FILE) ? "EOF" : current.text;
+        std::cout << "[Syntax Error]: " << errMsg << " (Found: '" << found << "')" << std::endl;
         hasError = true;
     }
 }
@@ -382,40 +387,55 @@ void Compiler::taskDeclaration() {
 
     CompilerContext* parentContext = currentContext;
     Loop* enclosingLoop = currentLoop;
-    currentContext = &fnContext;
-    currentLoop = nullptr;
 
-    consume(TokenType::LPAREN, "Expected '(' after task name");
-    if (current.type != TokenType::RPAREN) {
-        do {
-            fn->arity++;
-            if (fn->arity > 255) {
-                std::cout << "[Compiler Error]: Cannot have more than 255 parameters." << std::endl;
-                hasError = true;
+    {
+        currentContext = &fnContext;
+        currentLoop = nullptr;
+
+        struct TaskScopeGuard {
+            CompilerContext** ctxPtr;
+            CompilerContext* parentCtx;
+            Loop** loopPtr;
+            Loop* parentLoop;
+            TaskScopeGuard(CompilerContext** cP, CompilerContext* pC, Loop** lP, Loop* pL)
+                : ctxPtr(cP), parentCtx(pC), loopPtr(lP), parentLoop(pL) {}
+            ~TaskScopeGuard() {
+                *ctxPtr = parentCtx;
+                *loopPtr = parentLoop;
             }
-            if (current.type != TokenType::IDENTIFIER) {
-                std::cout << "[Syntax Error]: Expected parameter name" << std::endl;
-                hasError = true;
-            } else {
-                addLocal(current.text);
-                advance();
-            }
-        } while (match(TokenType::COMMA));
+        } taskGuard(&currentContext, parentContext, &currentLoop, enclosingLoop);
+
+        consume(TokenType::LPAREN, "Expected '(' after task name");
+        if (current.type != TokenType::RPAREN) {
+            do {
+                fn->arity++;
+                if (fn->arity > 255) {
+                    std::cout << "[Compiler Error]: Cannot have more than 255 parameters." << std::endl;
+                    hasError = true;
+                }
+                if (current.type != TokenType::IDENTIFIER) {
+                    std::cout << "[Syntax Error]: Expected parameter name" << std::endl;
+                    hasError = true;
+                } else {
+                    addLocal(current.text);
+                    advance();
+                }
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RPAREN, "Expected ')' after parameters");
+        consume(TokenType::LBRACE, "Expected '{' before task body");
+
+        while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+            statement();
+        }
+        consume(TokenType::RBRACE, "Expected '}' after task body");
+
+        // Default implicit return nil
+        chunk().writeOp(OpCode::OP_NIL);
+        chunk().writeOp(OpCode::OP_RETURN);
     }
-    consume(TokenType::RPAREN, "Expected ')' after parameters");
-    consume(TokenType::LBRACE, "Expected '{' before task body");
 
-    while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
-        statement();
-    }
-    consume(TokenType::RBRACE, "Expected '}' after task body");
-
-    // Default implicit return nil
-    chunk().writeOp(OpCode::OP_NIL);
-    chunk().writeOp(OpCode::OP_RETURN);
-
-    currentContext = parentContext;
-    currentLoop = enclosingLoop;
+    if (hasError) return;
 
     uint8_t fnConstantIdx = chunk().addConstant(Value(fn));
     chunk().writeOp(OpCode::OP_CONSTANT);
@@ -486,6 +506,13 @@ void Compiler::whileStatement() {
     loop.enclosing = currentLoop;
     currentLoop = &loop;
 
+    struct LoopGuard {
+        Loop** targetPtr;
+        Loop* resetVal;
+        LoopGuard(Loop** ptr, Loop* val) : targetPtr(ptr), resetVal(val) {}
+        ~LoopGuard() { *targetPtr = resetVal; }
+    } loopGuard(&currentLoop, loop.enclosing);
+
     consume(TokenType::LPAREN, "Expected '(' after 'while'");
     expression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
@@ -503,18 +530,17 @@ void Compiler::whileStatement() {
     for (int breakJump : loop.breakJumps) {
         patchJump(breakJump);
     }
-
-    currentLoop = loop.enclosing;
 }
 
 void Compiler::haltStatement() {
     advance(); // consume 'halt'
-    consume(TokenType::TILDE, "Every statement must end with '~'");
     if (!currentLoop) {
         std::cout << "[Compiler Error]: Cannot use 'halt' outside of a loop." << std::endl;
         hasError = true;
+        consume(TokenType::TILDE, "Every statement must end with '~'");
         return;
     }
+    consume(TokenType::TILDE, "Every statement must end with '~'");
     for (int i = currentContext->localCount - 1; i >= 0; i--) {
         if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
             chunk().writeOp(OpCode::OP_POP);
@@ -528,12 +554,13 @@ void Compiler::haltStatement() {
 
 void Compiler::skipStatement() {
     advance(); // consume 'skip'
-    consume(TokenType::TILDE, "Every statement must end with '~'");
     if (!currentLoop) {
         std::cout << "[Compiler Error]: Cannot use 'skip' outside of a loop." << std::endl;
         hasError = true;
+        consume(TokenType::TILDE, "Every statement must end with '~'");
         return;
     }
+    consume(TokenType::TILDE, "Every statement must end with '~'");
     for (int i = currentContext->localCount - 1; i >= 0; i--) {
         if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
             chunk().writeOp(OpCode::OP_POP);

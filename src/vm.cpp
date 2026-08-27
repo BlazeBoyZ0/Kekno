@@ -25,7 +25,12 @@ Value VM::peek(int distance) {
     return stack[stack.size() - 1 - distance];
 }
 
-bool VM::call(FunctionPtr function, int argCount) {
+void VM::resetStack() {
+    stack.clear();
+    frames.clear();
+}
+
+bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
     if (argCount != function->arity) {
         std::cout << "[Runtime Error]: Expected " << function->arity << " arguments but got " << argCount << "." << std::endl;
         return false;
@@ -38,6 +43,7 @@ bool VM::call(FunctionPtr function, int argCount) {
     frame.function = function;
     frame.ip = function->chunk.code.data();
     frame.slotsOffset = stack.size() - argCount - 1;
+    frame.isGrab = isGrab;
     frames.push_back(frame);
     return true;
 }
@@ -84,12 +90,14 @@ VM::VM() {
 
     globals["has"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: has() expects 2 arguments.");
-        if (args[0].isMap() && args[0].map) {
+        if (args[0].isMap()) {
             if (!args[1].isString()) {
                 throw std::runtime_error("[Runtime Error]: map key must be a string in has().");
             }
+            if (!args[0].map) return Value(false);
             return Value(args[0].map->table.find(args[1].str) != args[0].map->table.end());
-        } else if (args[0].isArray() && args[0].array) {
+        } else if (args[0].isArray()) {
+            if (!args[0].array) return Value(false);
             for (const Value& elem : *args[0].array) {
                 if (elem.isEqual(args[1])) return Value(true);
             }
@@ -100,18 +108,23 @@ VM::VM() {
 
     globals["purge"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: purge() expects 2 arguments.");
-        if (args[0].isMap() && args[0].map) {
+        if (args[0].isMap()) {
+            if (!args[0].map) throw std::runtime_error("[Runtime Error]: purge() expects non-null map as first argument.");
             if (!args[1].isString()) {
                 throw std::runtime_error("[Runtime Error]: purge() map key must be a string.");
             }
             bool removed = args[0].map->remove(args[1].str);
             return Value(removed);
-        } else if (args[0].isArray() && args[0].array) {
+        } else if (args[0].isArray()) {
+            if (!args[0].array) throw std::runtime_error("[Runtime Error]: purge() expects non-null array as first argument.");
             if (!args[1].isNumber()) {
                 throw std::runtime_error("[Runtime Error]: purge() array index must be a number.");
             }
+            if (std::isnan(args[1].num) || std::isinf(args[1].num) || std::floor(args[1].num) != args[1].num) {
+                throw std::runtime_error("[Runtime Error]: purge() array index must be an integer.");
+            }
             int idx = static_cast<int>(args[1].num);
-            if (args[1].num != idx || idx < 0 || idx >= static_cast<int>(args[0].array->size())) {
+            if (idx < 0 || idx >= static_cast<int>(args[0].array->size())) {
                 throw std::runtime_error("[Runtime Error]: purge() array index out of bounds.");
             }
             args[0].array->erase(args[0].array->begin() + idx);
@@ -188,6 +201,7 @@ VM::VM() {
     }));
 
     globals["clock"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        (void)args;
         if (argCount != 0) throw std::runtime_error("[Runtime Error]: clock() expects 0 arguments.");
         auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
         double seconds = std::chrono::duration<double>(now).count();
@@ -195,6 +209,7 @@ VM::VM() {
     }));
 
     globals["rand"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        (void)args;
         if (argCount != 0) throw std::runtime_error("[Runtime Error]: rand() expects 0 arguments.");
         static std::mt19937 rng(std::random_device{}());
         static std::uniform_real_distribution<double> dist(0.0, 1.0);
@@ -222,6 +237,7 @@ VM::VM() {
     globals["sqrt"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: sqrt() expects 1 argument.");
         if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: sqrt() expects a number.");
+        if (args[0].num < 0.0) throw std::runtime_error("[Runtime Error]: Cannot calculate square root of negative number.");
         return Value(std::sqrt(args[0].num));
     }));
 
@@ -229,6 +245,9 @@ VM::VM() {
         if (argCount != 3) throw std::runtime_error("[Runtime Error]: clamp() expects 3 arguments.");
         if (!args[0].isNumber() || !args[1].isNumber() || !args[2].isNumber()) {
             throw std::runtime_error("[Runtime Error]: clamp() expects numbers.");
+        }
+        if (args[1].num > args[2].num) {
+            throw std::runtime_error("[Runtime Error]: clamp() min value cannot be greater than max value.");
         }
         double val = args[0].num;
         double minVal = args[1].num;
@@ -238,13 +257,25 @@ VM::VM() {
 }
 
 void VM::run(Chunk& mainChunk) {
+    resetStack();
+    grabSnapshots.clear();
+
+    struct VMRunGuard {
+        VM* vm;
+        VMRunGuard(VM* v) : vm(v) {}
+        ~VMRunGuard() {
+            if (!vm->grabSnapshots.empty()) {
+                vm->globals = vm->grabSnapshots.front();
+                vm->grabSnapshots.clear();
+            }
+            vm->resetStack();
+        }
+    } runGuard(this);
+
     FunctionPtr mainFn = std::make_shared<ObjFunction>();
     mainFn->chunk = mainChunk;
     mainFn->name = "main";
     mainFn->arity = 0;
-
-    frames.clear();
-    stack.clear();
 
     push(Value(mainFn));
     call(mainFn, 0);
@@ -386,11 +417,11 @@ void VM::run(Chunk& mainChunk) {
                         std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
                         return;
                     }
-                    int index = static_cast<int>(indexVal.num);
-                    if (indexVal.num != index) {
+                    if (std::isnan(indexVal.num) || std::isinf(indexVal.num) || std::floor(indexVal.num) != indexVal.num) {
                         std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
                         return;
                     }
+                    int index = static_cast<int>(indexVal.num);
                     if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
                         std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
                         return;
@@ -401,11 +432,11 @@ void VM::run(Chunk& mainChunk) {
                         std::cout << "[Runtime Error]: String index must be a number." << std::endl;
                         return;
                     }
-                    int index = static_cast<int>(indexVal.num);
-                    if (indexVal.num != index) {
+                    if (std::isnan(indexVal.num) || std::isinf(indexVal.num) || std::floor(indexVal.num) != indexVal.num) {
                         std::cout << "[Runtime Error]: String index must be an integer." << std::endl;
                         return;
                     }
+                    int index = static_cast<int>(indexVal.num);
                     if (index < 0 || index >= static_cast<int>(target.str.length())) {
                         std::cout << "[Runtime Error]: String index " << index << " out of bounds." << std::endl;
                         return;
@@ -438,11 +469,11 @@ void VM::run(Chunk& mainChunk) {
                         std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
                         return;
                     }
-                    int index = static_cast<int>(indexVal.num);
-                    if (indexVal.num != index) {
+                    if (std::isnan(indexVal.num) || std::isinf(indexVal.num) || std::floor(indexVal.num) != indexVal.num) {
                         std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
                         return;
                     }
+                    int index = static_cast<int>(indexVal.num);
                     if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
                         std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
                         return;
@@ -478,8 +509,9 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: Could not compile grab file \"" << pathVal.str << "\"." << std::endl;
                     return;
                 }
+                grabSnapshots.push_back(globals);
                 push(Value(grabFn));
-                if (!call(grabFn, 0)) {
+                if (!call(grabFn, 0, true)) {
                     return;
                 }
                 frame = &frames.back();
@@ -618,7 +650,11 @@ void VM::run(Chunk& mainChunk) {
             case OpCode::OP_RETURN: {
                 Value result = pop();
                 size_t slotsOffset = frame->slotsOffset;
+                bool wasGrab = frame->isGrab;
                 frames.pop_back();
+                if (wasGrab && !grabSnapshots.empty()) {
+                    grabSnapshots.pop_back();
+                }
                 if (frames.empty()) {
                     pop(); // pop main function
                     return;

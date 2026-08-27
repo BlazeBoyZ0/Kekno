@@ -44,6 +44,8 @@ static void runRepl() {
 
         if (compiler.compile()) {
             vm.run(bytecode);
+        } else {
+            vm.resetStack();
         }
         std::cout << std::endl;
     }

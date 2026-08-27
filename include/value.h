@@ -52,15 +52,7 @@ struct Value {
     bool isMap() const { return type == ValueType::MAP; }
     bool isNative() const { return type == ValueType::NATIVE; }
 
-    bool isFalsey() const {
-        if (isNil()) return true;
-        if (isBool()) return !boolean;
-        if (isNumber()) return num == 0.0;
-        if (isString()) return str.empty();
-        if (isArray()) return array == nullptr || array->empty();
-        if (isMap()) return map == nullptr; // checked after ObjMap definition below
-        return false;
-    }
+    bool isFalsey() const;
 
     bool isEqual(const Value& other) const {
         if (type != other.type) return false;
@@ -106,6 +98,16 @@ struct ObjMap {
         return false;
     }
 };
+
+inline bool Value::isFalsey() const {
+    if (isNil()) return true;
+    if (isBool()) return !boolean;
+    if (isNumber()) return num == 0.0;
+    if (isString()) return str.empty();
+    if (isArray()) return array == nullptr || array->empty();
+    if (isMap()) return map == nullptr || map->table.empty();
+    return false;
+}
 
 inline std::string Value::toString() const {
     if (isNil()) return "nil";
