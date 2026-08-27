@@ -32,13 +32,19 @@ void Lexer::skipWhitespace() {
             // Multi-line comment: skip until */ or EOF
             advance(); // consume '/'
             advance(); // consume '*'
+            bool closed = false;
             while (current < source.length()) {
                 if (peek() == '*' && current + 1 < source.length() && source[current + 1] == '/') {
                     advance(); // consume '*'
                     advance(); // consume '/'
+                    closed = true;
                     break;
                 }
                 advance();
+            }
+            if (!closed) {
+                unclosedComment = true;
+                break;
             }
         } else {
             break;
@@ -47,7 +53,15 @@ void Lexer::skipWhitespace() {
 }
 
 Token Lexer::nextToken() {
+    if (unclosedComment) {
+        unclosedComment = false;
+        return {TokenType::ERROR, "Unclosed block comment", 0.0, ""};
+    }
     skipWhitespace();
+    if (unclosedComment) {
+        unclosedComment = false;
+        return {TokenType::ERROR, "Unclosed block comment", 0.0, ""};
+    }
     if (current >= source.length()) return {TokenType::END_OF_FILE, "", 0.0, ""};
 
     char c = advance();

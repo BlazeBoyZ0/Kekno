@@ -6,6 +6,7 @@ class Lexer {
 private:
     std::string source;
     size_t current = 0;
+    bool unclosedComment = false;
 
     char peek();
     char advance();

@@ -73,7 +73,6 @@ private:
     void equality();
     void andExpression();
     void orExpression();
-    void assignment();
     void expression();
 
     void varDeclaration();
