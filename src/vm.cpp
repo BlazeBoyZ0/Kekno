@@ -8,6 +8,13 @@
 #include <random>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
+
+static uint16_t read16(const uint8_t*& ip) {
+    uint16_t value = (static_cast<uint16_t>(ip[0]) << 8) | ip[1];
+    ip += 2;
+    return value;
+}
 
 void VM::push(Value value) {
     stack.push_back(value);
@@ -35,10 +42,38 @@ bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
         std::cout << "[Runtime Error]: Expected " << function->arity << " arguments but got " << argCount << "." << std::endl;
         return false;
     }
-    if (frames.size() >= 256) {
+    if (frames.size() >= 65536) {
         std::cout << "[Runtime Error]: Stack overflow." << std::endl;
         return false;
     }
+
+    // Argument type validation
+    for (size_t i = 0; i < function->paramTypes.size(); i++) {
+        TypeSpec expected = function->paramTypes[i];
+        if (expected.kind == TypeKind::ANY || expected.kind == TypeKind::UNTYPED) continue;
+        Value arg = stack[stack.size() - argCount + i];
+
+        if (expected.kind == TypeKind::FLOAT && arg.isInt()) {
+            // Implicit int -> float coercion allowed
+            stack[stack.size() - argCount + i] = Value(static_cast<double>(arg.intVal));
+            continue;
+        }
+
+        bool matchType = false;
+        if (expected.kind == TypeKind::INT && arg.isInt()) matchType = true;
+        else if (expected.kind == TypeKind::FLOAT && arg.isFloat()) matchType = true;
+        else if (expected.kind == TypeKind::STRING && arg.isString()) matchType = true;
+        else if (expected.kind == TypeKind::BOOL && arg.isBool()) matchType = true;
+        else if (expected.kind == TypeKind::CHAR && arg.isChar()) matchType = true;
+        else if (expected.kind == TypeKind::ARRAY && arg.isArray()) matchType = true;
+        else if (expected.kind == TypeKind::MAP && arg.isMap()) matchType = true;
+
+        if (!matchType) {
+            std::cout << "[Runtime Error]: Argument " << (i + 1) << " expects type " << expected.toString() << " but got " << arg.getTypeSpec().toString() << "." << std::endl;
+            return false;
+        }
+    }
+
     CallFrame frame;
     frame.function = function;
     frame.ip = function->chunk.code.data();
@@ -48,15 +83,23 @@ bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
     return true;
 }
 
+static std::string trimString(const std::string& str) {
+    size_t start = 0;
+    while (start < str.length() && std::isspace(static_cast<unsigned char>(str[start]))) start++;
+    size_t end = str.length();
+    while (end > start && std::isspace(static_cast<unsigned char>(str[end - 1]))) end--;
+    return str.substr(start, end - start);
+}
+
 VM::VM() {
     globals["size"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: size() expects 1 argument.");
         if (args[0].isArray()) {
-            return Value(static_cast<double>(args[0].array ? args[0].array->size() : 0));
+            return Value(static_cast<int64_t>(args[0].array ? args[0].array->size() : 0));
         } else if (args[0].isString()) {
-            return Value(static_cast<double>(args[0].str.length()));
+            return Value(static_cast<int64_t>(args[0].str.length()));
         } else if (args[0].isMap()) {
-            return Value(static_cast<double>(args[0].map ? args[0].map->table.size() : 0));
+            return Value(static_cast<int64_t>(args[0].map ? args[0].map->table.size() : 0));
         }
         throw std::runtime_error("[Runtime Error]: size() expects array, map, or string argument.");
     }));
@@ -117,14 +160,11 @@ VM::VM() {
             return Value(removed);
         } else if (args[0].isArray()) {
             if (!args[0].array) throw std::runtime_error("[Runtime Error]: purge() expects non-null array as first argument.");
-            if (!args[1].isNumber()) {
-                throw std::runtime_error("[Runtime Error]: purge() array index must be a number.");
-            }
-            if (std::isnan(args[1].num) || std::isinf(args[1].num) || std::floor(args[1].num) != args[1].num) {
+            if (!args[1].isInt()) {
                 throw std::runtime_error("[Runtime Error]: purge() array index must be an integer.");
             }
-            int idx = static_cast<int>(args[1].num);
-            if (idx < 0 || idx >= static_cast<int>(args[0].array->size())) {
+            int64_t idx = args[1].intVal;
+            if (idx < 0 || idx >= static_cast<int64_t>(args[0].array->size())) {
                 throw std::runtime_error("[Runtime Error]: purge() array index out of bounds.");
             }
             args[0].array->erase(args[0].array->begin() + idx);
@@ -167,7 +207,9 @@ VM::VM() {
     globals["scan"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: scan() expects 1 argument.");
         switch (args[0].type) {
-            case ValueType::NUMBER: return Value(std::string("number"));
+            case ValueType::INT: return Value(std::string("int"));
+            case ValueType::FLOAT: return Value(std::string("float"));
+            case ValueType::CHAR: return Value(std::string("char"));
             case ValueType::STRING: return Value(std::string("string"));
             case ValueType::BOOL: return Value(std::string("bool"));
             case ValueType::ARRAY: return Value(std::string("array"));
@@ -181,14 +223,20 @@ VM::VM() {
 
     globals["cast_num"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_num() expects 1 argument.");
-        if (args[0].isNumber()) return args[0];
-        if (args[0].isBool()) return Value(args[0].boolean ? 1.0 : 0.0);
+        if (args[0].isInt()) return args[0];
+        if (args[0].isFloat()) return args[0];
+        if (args[0].isBool()) return Value(static_cast<int64_t>(args[0].boolean ? 1 : 0));
         if (args[0].isString()) {
             if (args[0].str.empty()) throw std::runtime_error("[Runtime Error]: Cannot cast empty string to number.");
             size_t pos = 0;
             try {
-                double val = std::stod(args[0].str, &pos);
-                if (pos == args[0].str.length()) return Value(val);
+                if (args[0].str.find('.') != std::string::npos) {
+                    double val = std::stod(args[0].str, &pos);
+                    if (pos == args[0].str.length()) return Value(val);
+                } else {
+                    int64_t val = std::stoll(args[0].str, &pos, 10);
+                    if (pos == args[0].str.length()) return Value(val);
+                }
             } catch (...) {}
             throw std::runtime_error("[Runtime Error]: Cannot cast string '" + args[0].str + "' to number.");
         }
@@ -200,6 +248,188 @@ VM::VM() {
         return Value(args[0].toString());
     }));
 
+    // Explicit Type Casts
+    globals["cast_int"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_int() expects 1 argument.");
+        if (args[0].isInt()) return args[0];
+        if (args[0].isFloat()) {
+            double f = args[0].floatVal;
+            if (std::isnan(f) || std::isinf(f)) {
+                throw std::runtime_error("[Runtime Error]: Cannot cast NaN or Infinity to int.");
+            }
+            double rounded = (f >= 0) ? std::floor(f + 0.5) : std::ceil(f - 0.5);
+            return Value(static_cast<int64_t>(rounded));
+        }
+        if (args[0].isBool()) return Value(static_cast<int64_t>(args[0].boolean ? 1 : 0));
+        if (args[0].isString()) {
+            try {
+                size_t pos = 0;
+                int64_t val = std::stoll(args[0].str, &pos, 10);
+                if (pos == args[0].str.length()) return Value(val);
+            } catch (...) {}
+            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + args[0].str + "' to int.");
+        }
+        throw std::runtime_error("[Runtime Error]: Invalid conversion to int.");
+    }));
+
+    globals["cast_float"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_float() expects 1 argument.");
+        if (args[0].isFloat()) return args[0];
+        if (args[0].isInt()) return Value(static_cast<double>(args[0].intVal));
+        if (args[0].isBool()) return Value(args[0].boolean ? 1.0 : 0.0);
+        if (args[0].isString()) {
+            try {
+                size_t pos = 0;
+                double val = std::stod(args[0].str, &pos);
+                if (pos == args[0].str.length()) return Value(val);
+            } catch (...) {}
+            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + args[0].str + "' to float.");
+        }
+        throw std::runtime_error("[Runtime Error]: Invalid conversion to float.");
+    }));
+
+    globals["cast_string"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_string() expects 1 argument.");
+        return Value(args[0].toString());
+    }));
+
+    globals["cast_char"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_char() expects 1 argument.");
+        if (args[0].isChar()) return args[0];
+        if (args[0].isString()) {
+            std::string s = args[0].str;
+            if (s.empty()) throw std::runtime_error("[Runtime Error]: Cannot cast empty string to char.");
+            // Parse UTF-8 character length
+            unsigned char ch = static_cast<unsigned char>(s[0]);
+            size_t charLen = 1;
+            char32_t code = 0;
+            if (ch < 0x80) { code = ch; charLen = 1; }
+            else if ((ch & 0xE0) == 0xC0) { code = (ch & 0x1F) << 6 | (s[1] & 0x3F); charLen = 2; }
+            else if ((ch & 0xF0) == 0xE0) { code = (ch & 0x0F) << 12 | (s[1] & 0x3F) << 6 | (s[2] & 0x3F); charLen = 3; }
+            else if ((ch & 0xF8) == 0xF0) { code = (ch & 0x07) << 18 | (s[1] & 0x3F) << 12 | (s[2] & 0x3F) << 6 | (s[3] & 0x3F); charLen = 4; }
+
+            if (charLen != s.length()) {
+                throw std::runtime_error("[Runtime Error]: cast_char() requires a single-character string.");
+            }
+            return Value(code, true);
+        }
+        throw std::runtime_error("[Runtime Error]: cast_char() requires an actual single-character value.");
+    }));
+
+    globals["cast_array"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_array() expects 1 argument.");
+        if (args[0].isArray()) return args[0];
+        if (args[0].isString()) {
+            ArrayPtr arr = std::make_shared<std::vector<Value>>();
+            for (char c : args[0].str) {
+                arr->push_back(Value(static_cast<char32_t>(c), true));
+            }
+            return Value(arr);
+        }
+        throw std::runtime_error("[Runtime Error]: Cannot cast value to array.");
+    }));
+
+    globals["cast_map"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_map() expects 1 argument.");
+        if (args[0].isMap()) return args[0];
+        throw std::runtime_error("[Runtime Error]: Cannot cast value to map.");
+    }));
+
+    // String Builtins
+    globals["upper"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: upper() expects 1 argument.");
+        if (!args[0].isString()) throw std::runtime_error("[Runtime Error]: upper() expects string.");
+        std::string s = args[0].str;
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
+        return Value(s);
+    }));
+
+    globals["lower"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: lower() expects 1 argument.");
+        if (!args[0].isString()) throw std::runtime_error("[Runtime Error]: lower() expects string.");
+        std::string s = args[0].str;
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+        return Value(s);
+    }));
+
+    globals["trim"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 1) throw std::runtime_error("[Runtime Error]: trim() expects 1 argument.");
+        if (!args[0].isString()) throw std::runtime_error("[Runtime Error]: trim() expects string.");
+        return Value(trimString(args[0].str));
+    }));
+
+    globals["contains"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: contains() expects 2 arguments.");
+        if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: contains() expects string arguments.");
+        return Value(args[0].str.find(args[1].str) != std::string::npos);
+    }));
+
+    globals["starts_with"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: starts_with() expects 2 arguments.");
+        if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: starts_with() expects string arguments.");
+        return Value(args[0].str.rfind(args[1].str, 0) == 0);
+    }));
+
+    globals["ends_with"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: ends_with() expects 2 arguments.");
+        if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: ends_with() expects string arguments.");
+        if (args[1].str.length() > args[0].str.length()) return Value(false);
+        return Value(args[0].str.compare(args[0].str.length() - args[1].str.length(), args[1].str.length(), args[1].str) == 0);
+    }));
+
+    globals["split"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: split() expects 2 arguments.");
+        if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: split() expects string arguments.");
+        ArrayPtr arr = std::make_shared<std::vector<Value>>();
+        std::string str = args[0].str;
+        std::string delim = args[1].str;
+        if (delim.empty()) {
+            for (char c : str) arr->push_back(Value(std::string(1, c)));
+        } else {
+            size_t start = 0;
+            size_t end = str.find(delim);
+            while (end != std::string::npos) {
+                arr->push_back(Value(str.substr(start, end - start)));
+                start = end + delim.length();
+                end = str.find(delim, start);
+            }
+            arr->push_back(Value(str.substr(start)));
+        }
+        return Value(arr);
+    }));
+
+    globals["join"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 2) throw std::runtime_error("[Runtime Error]: join() expects 2 arguments.");
+        if (!args[0].isArray() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: join() expects array and string arguments.");
+        std::string result = "";
+        std::string delim = args[1].str;
+        if (args[0].array) {
+            for (size_t i = 0; i < args[0].array->size(); i++) {
+                if (i > 0) result += delim;
+                result += (*args[0].array)[i].toString();
+            }
+        }
+        return Value(result);
+    }));
+
+    globals["replace"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+        if (argCount != 3) throw std::runtime_error("[Runtime Error]: replace() expects 3 arguments.");
+        if (!args[0].isString() || !args[1].isString() || !args[2].isString()) {
+            throw std::runtime_error("[Runtime Error]: replace() expects string arguments.");
+        }
+        std::string str = args[0].str;
+        std::string from = args[1].str;
+        std::string to = args[2].str;
+        if (from.empty()) return Value(str);
+        size_t start_pos = 0;
+        while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+            str.replace(start_pos, from.length(), to);
+            start_pos += to.length();
+        }
+        return Value(str);
+    }));
+
+    // Math Functions
     globals["clock"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         (void)args;
         if (argCount != 0) throw std::runtime_error("[Runtime Error]: clock() expects 0 arguments.");
@@ -218,27 +448,31 @@ VM::VM() {
 
     globals["abs"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: abs() expects 1 argument.");
-        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: abs() expects a number.");
-        return Value(std::abs(args[0].num));
+        if (args[0].isInt()) return Value(std::abs(args[0].intVal));
+        if (args[0].isFloat()) return Value(std::abs(args[0].floatVal));
+        throw std::runtime_error("[Runtime Error]: abs() expects a number.");
     }));
 
     globals["floor"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: floor() expects 1 argument.");
-        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: floor() expects a number.");
-        return Value(std::floor(args[0].num));
+        if (args[0].isInt()) return args[0];
+        if (args[0].isFloat()) return Value(std::floor(args[0].floatVal));
+        throw std::runtime_error("[Runtime Error]: floor() expects a number.");
     }));
 
     globals["ceil"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: ceil() expects 1 argument.");
-        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: ceil() expects a number.");
-        return Value(std::ceil(args[0].num));
+        if (args[0].isInt()) return args[0];
+        if (args[0].isFloat()) return Value(std::ceil(args[0].floatVal));
+        throw std::runtime_error("[Runtime Error]: ceil() expects a number.");
     }));
 
     globals["sqrt"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: sqrt() expects 1 argument.");
         if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: sqrt() expects a number.");
-        if (args[0].num < 0.0) throw std::runtime_error("[Runtime Error]: Cannot calculate square root of negative number.");
-        return Value(std::sqrt(args[0].num));
+        double val = args[0].asFloat();
+        if (val < 0.0) throw std::runtime_error("[Runtime Error]: Cannot calculate square root of negative number.");
+        return Value(std::sqrt(val));
     }));
 
     globals["clamp"] = Value(NativeFn([](int argCount, Value* args) -> Value {
@@ -246,12 +480,18 @@ VM::VM() {
         if (!args[0].isNumber() || !args[1].isNumber() || !args[2].isNumber()) {
             throw std::runtime_error("[Runtime Error]: clamp() expects numbers.");
         }
-        if (args[1].num > args[2].num) {
+        if (args[1].asFloat() > args[2].asFloat()) {
             throw std::runtime_error("[Runtime Error]: clamp() min value cannot be greater than max value.");
         }
-        double val = args[0].num;
-        double minVal = args[1].num;
-        double maxVal = args[2].num;
+        if (args[0].isInt() && args[1].isInt() && args[2].isInt()) {
+            int64_t val = args[0].intVal;
+            int64_t minVal = args[1].intVal;
+            int64_t maxVal = args[2].intVal;
+            return Value(std::max(minVal, std::min(val, maxVal)));
+        }
+        double val = args[0].asFloat();
+        double minVal = args[1].asFloat();
+        double maxVal = args[2].asFloat();
         return Value(std::max(minVal, std::min(val, maxVal)));
     }));
 }
@@ -286,7 +526,7 @@ void VM::run(Chunk& mainChunk) {
         OpCode instruction = static_cast<OpCode>(*frame->ip++);
         switch (instruction) {
             case OpCode::OP_CONSTANT: {
-                uint8_t index = *frame->ip++;
+                uint16_t index = read16(frame->ip);
                 push(frame->function->chunk.constants[index]);
                 break;
             }
@@ -303,13 +543,13 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_DEFINE_GLOBAL: {
-                uint8_t index = *frame->ip++;
+                uint16_t index = read16(frame->ip);
                 std::string name = frame->function->chunk.constants[index].str;
                 globals[name] = pop();
                 break;
             }
             case OpCode::OP_GET_GLOBAL: {
-                uint8_t index = *frame->ip++;
+                uint16_t index = read16(frame->ip);
                 std::string name = frame->function->chunk.constants[index].str;
                 auto it = globals.find(name);
                 if (it == globals.end()) {
@@ -320,7 +560,7 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_SET_GLOBAL: {
-                uint8_t index = *frame->ip++;
+                uint16_t index = read16(frame->ip);
                 std::string name = frame->function->chunk.constants[index].str;
                 auto it = globals.find(name);
                 if (it == globals.end()) {
@@ -331,17 +571,17 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_GET_LOCAL: {
-                uint8_t slot = *frame->ip++;
+                uint16_t slot = read16(frame->ip);
                 push(stack[frame->slotsOffset + slot]);
                 break;
             }
             case OpCode::OP_SET_LOCAL: {
-                uint8_t slot = *frame->ip++;
+                uint16_t slot = read16(frame->ip);
                 stack[frame->slotsOffset + slot] = peek(0);
                 break;
             }
             case OpCode::OP_CALL: {
-                uint8_t argCount = *frame->ip++;
+                uint16_t argCount = read16(frame->ip);
                 Value callee = peek(argCount);
                 if (callee.isFunction()) {
                     if (!call(callee.function, argCount)) {
@@ -365,7 +605,7 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_BUILD_ARRAY: {
-                uint8_t elementCount = *frame->ip++;
+                uint16_t elementCount = read16(frame->ip);
                 ArrayPtr arr = std::make_shared<std::vector<Value>>();
                 arr->resize(elementCount);
                 for (int i = elementCount - 1; i >= 0; --i) {
@@ -375,7 +615,7 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_BUILD_MAP: {
-                uint8_t entryCount = *frame->ip++;
+                uint16_t entryCount = read16(frame->ip);
                 MapPtr mapObj = std::make_shared<ObjMap>();
                 std::vector<std::pair<std::string, Value>> entries(entryCount);
                 for (int i = entryCount - 1; i >= 0; --i) {
@@ -413,31 +653,23 @@ void VM::run(Chunk& mainChunk) {
                         push(Value());
                     }
                 } else if (target.isArray()) {
-                    if (!indexVal.isNumber()) {
-                        std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
-                        return;
-                    }
-                    if (std::isnan(indexVal.num) || std::isinf(indexVal.num) || std::floor(indexVal.num) != indexVal.num) {
+                    if (!indexVal.isInt()) {
                         std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
                         return;
                     }
-                    int index = static_cast<int>(indexVal.num);
-                    if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
+                    int64_t index = indexVal.intVal;
+                    if (!target.array || index < 0 || index >= static_cast<int64_t>(target.array->size())) {
                         std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
                         return;
                     }
                     push((*target.array)[index]);
                 } else if (target.isString()) {
-                    if (!indexVal.isNumber()) {
-                        std::cout << "[Runtime Error]: String index must be a number." << std::endl;
-                        return;
-                    }
-                    if (std::isnan(indexVal.num) || std::isinf(indexVal.num) || std::floor(indexVal.num) != indexVal.num) {
+                    if (!indexVal.isInt()) {
                         std::cout << "[Runtime Error]: String index must be an integer." << std::endl;
                         return;
                     }
-                    int index = static_cast<int>(indexVal.num);
-                    if (index < 0 || index >= static_cast<int>(target.str.length())) {
+                    int64_t index = indexVal.intVal;
+                    if (index < 0 || index >= static_cast<int64_t>(target.str.length())) {
                         std::cout << "[Runtime Error]: String index " << index << " out of bounds." << std::endl;
                         return;
                     }
@@ -465,16 +697,12 @@ void VM::run(Chunk& mainChunk) {
                     target.map->set(indexVal.str, val);
                     push(val);
                 } else if (target.isArray()) {
-                    if (!indexVal.isNumber()) {
-                        std::cout << "[Runtime Error]: Array index must be a number." << std::endl;
-                        return;
-                    }
-                    if (std::isnan(indexVal.num) || std::isinf(indexVal.num) || std::floor(indexVal.num) != indexVal.num) {
+                    if (!indexVal.isInt()) {
                         std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
                         return;
                     }
-                    int index = static_cast<int>(indexVal.num);
-                    if (!target.array || index < 0 || index >= static_cast<int>(target.array->size())) {
+                    int64_t index = indexVal.intVal;
+                    if (!target.array || index < 0 || index >= static_cast<int64_t>(target.array->size())) {
                         std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
                         return;
                     }
@@ -530,28 +758,43 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '>' only supports numbers!" << std::endl;
                     return;
                 }
-                push(Value(a.num > b.num));
+                if (a.isInt() && b.isInt()) {
+                    push(Value(a.intVal > b.intVal));
+                } else {
+                    push(Value(a.asFloat() > b.asFloat()));
+                }
                 break;
             }
             case OpCode::OP_LESS: {
                 Value b = pop();
                 Value a = pop();
                 if (!a.isNumber() || !b.isNumber()) {
-                    std::cout << "[Runtime Error]: '<' only supports numbers! (a: " << a.toString() << ", b: " << b.toString() << ")" << std::endl;
+                    std::cout << "[Runtime Error]: '<' only supports numbers!" << std::endl;
                     return;
                 }
-                push(Value(a.num < b.num));
+                if (a.isInt() && b.isInt()) {
+                    push(Value(a.intVal < b.intVal));
+                } else {
+                    push(Value(a.asFloat() < b.asFloat()));
+                }
                 break;
             }
             case OpCode::OP_ADD: {
                 Value b = pop();
                 Value a = pop();
-                if (a.isString() || b.isString()) {
+                if (a.isString() || b.isString() || a.isChar() || b.isChar()) {
                     push(Value(a.toString() + b.toString()));
+                } else if (a.isInt() && b.isInt()) {
+                    int64_t res;
+                    if (__builtin_add_overflow(a.intVal, b.intVal, &res)) {
+                        std::cout << "[Runtime Error]: 64-bit integer addition overflow." << std::endl;
+                        return;
+                    }
+                    push(Value(res));
                 } else if (a.isNumber() && b.isNumber()) {
-                    push(Value(a.num + b.num));
+                    push(Value(a.asFloat() + b.asFloat()));
                 } else {
-                    std::cout << "[Runtime Error]: '+' operands must be two numbers or strings." << std::endl;
+                    std::cout << "[Runtime Error]: '+' operands must be numbers, strings, or chars." << std::endl;
                     return;
                 }
                 break;
@@ -563,7 +806,16 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '-' only supports numbers!" << std::endl;
                     return;
                 }
-                push(Value(a.num - b.num));
+                if (a.isInt() && b.isInt()) {
+                    int64_t res;
+                    if (__builtin_sub_overflow(a.intVal, b.intVal, &res)) {
+                        std::cout << "[Runtime Error]: 64-bit integer subtraction overflow." << std::endl;
+                        return;
+                    }
+                    push(Value(res));
+                } else {
+                    push(Value(a.asFloat() - b.asFloat()));
+                }
                 break;
             }
             case OpCode::OP_MULTIPLY: {
@@ -573,7 +825,16 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '*' only supports numbers!" << std::endl;
                     return;
                 }
-                push(Value(a.num * b.num));
+                if (a.isInt() && b.isInt()) {
+                    int64_t res;
+                    if (__builtin_mul_overflow(a.intVal, b.intVal, &res)) {
+                        std::cout << "[Runtime Error]: 64-bit integer multiplication overflow." << std::endl;
+                        return;
+                    }
+                    push(Value(res));
+                } else {
+                    push(Value(a.asFloat() * b.asFloat()));
+                }
                 break;
             }
             case OpCode::OP_DIVIDE: {
@@ -583,11 +844,19 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '/' only supports numbers!" << std::endl;
                     return;
                 }
-                if (b.num == 0.0) {
+                if (b.asFloat() == 0.0) {
                     std::cout << "[Runtime Error]: Division by zero!" << std::endl;
                     return;
                 }
-                push(Value(a.num / b.num));
+                if (a.isInt() && b.isInt()) {
+                    if (a.intVal % b.intVal == 0) {
+                        push(Value(a.intVal / b.intVal));
+                    } else {
+                        push(Value(static_cast<double>(a.intVal) / static_cast<double>(b.intVal)));
+                    }
+                } else {
+                    push(Value(a.asFloat() / b.asFloat()));
+                }
                 break;
             }
             case OpCode::OP_MODULO: {
@@ -597,11 +866,15 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '%' only supports numbers!" << std::endl;
                     return;
                 }
-                if (b.num == 0.0) {
+                if (b.asFloat() == 0.0) {
                     std::cout << "[Runtime Error]: Modulo by zero!" << std::endl;
                     return;
                 }
-                push(Value(std::fmod(a.num, b.num)));
+                if (a.isInt() && b.isInt()) {
+                    push(Value(a.intVal % b.intVal));
+                } else {
+                    push(Value(std::fmod(a.asFloat(), b.asFloat())));
+                }
                 break;
             }
             case OpCode::OP_POWER: {
@@ -611,7 +884,12 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '^' only supports numbers!" << std::endl;
                     return;
                 }
-                push(Value(std::pow(a.num, b.num)));
+                if (a.isInt() && b.isInt() && b.intVal >= 0) {
+                    double powRes = std::pow(static_cast<double>(a.intVal), static_cast<double>(b.intVal));
+                    push(Value(static_cast<int64_t>(powRes)));
+                } else {
+                    push(Value(std::pow(a.asFloat(), b.asFloat())));
+                }
                 break;
             }
             case OpCode::OP_NOT: {
@@ -645,6 +923,17 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_POP: {
                 pop();
+                break;
+            }
+            case OpCode::OP_DUP: {
+                push(peek(0));
+                break;
+            }
+            case OpCode::OP_DUP_2: {
+                Value v1 = peek(1);
+                Value v0 = peek(0);
+                push(v1);
+                push(v0);
                 break;
             }
             case OpCode::OP_RETURN: {

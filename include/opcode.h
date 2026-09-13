@@ -32,5 +32,7 @@ enum class OpCode : uint8_t {
     OP_LOOP,
     OP_PRINT,
     OP_POP,
+    OP_DUP,
+    OP_DUP_2,
     OP_RETURN
 };
