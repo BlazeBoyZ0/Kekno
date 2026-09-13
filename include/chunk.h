@@ -10,6 +10,7 @@ struct Chunk {
     std::vector<Value> constants;
 
     void writeByte(uint8_t byte);
+    void write16(uint16_t value);
     void writeOp(OpCode op);
-    uint8_t addConstant(Value value);
+    uint16_t addConstant(Value value);
 };
