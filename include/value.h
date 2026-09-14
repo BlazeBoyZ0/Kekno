@@ -22,9 +22,20 @@ struct TypeSpec {
     TypeKind keyKind = TypeKind::ANY;
     TypeKind valueKind = TypeKind::ANY;
 
+    std::shared_ptr<TypeSpec> elemType = nullptr;
+    std::shared_ptr<TypeSpec> keyType = nullptr;
+    std::shared_ptr<TypeSpec> valType = nullptr;
+
     bool operator==(const TypeSpec& other) const {
-        return kind == other.kind && elementKind == other.elementKind &&
-               keyKind == other.keyKind && valueKind == other.valueKind;
+        if (kind != other.kind || elementKind != other.elementKind ||
+            keyKind != other.keyKind || valueKind != other.valueKind) return false;
+        if ((elemType == nullptr) != (other.elemType == nullptr)) return false;
+        if (elemType && !(*elemType == *other.elemType)) return false;
+        if ((keyType == nullptr) != (other.keyType == nullptr)) return false;
+        if (keyType && !(*keyType == *other.keyType)) return false;
+        if ((valType == nullptr) != (other.valType == nullptr)) return false;
+        if (valType && !(*valType == *other.valType)) return false;
+        return true;
     }
     bool operator!=(const TypeSpec& other) const {
         return !(*this == other);
@@ -203,12 +214,20 @@ inline std::string TypeSpec::toString() const {
         case TypeKind::STRING: return "string";
         case TypeKind::BOOL: return "bool";
         case TypeKind::ARRAY:
+            if (elemType) {
+                return "array<" + elemType->toString() + ">";
+            }
             if (elementKind != TypeKind::ANY) {
                 TypeSpec elem{elementKind};
                 return "array<" + elem.toString() + ">";
             }
             return "array";
         case TypeKind::MAP:
+            if (keyType || valType) {
+                TypeSpec kSpec = keyType ? *keyType : TypeSpec{keyKind};
+                TypeSpec vSpec = valType ? *valType : TypeSpec{valueKind};
+                return "map<" + kSpec.toString() + ", " + vSpec.toString() + ">";
+            }
             if (keyKind != TypeKind::ANY || valueKind != TypeKind::ANY) {
                 TypeSpec kSpec{keyKind}, vSpec{valueKind};
                 return "map<" + kSpec.toString() + ", " + vSpec.toString() + ">";

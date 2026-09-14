@@ -37,6 +37,8 @@ void VM::resetStack() {
     frames.clear();
 }
 
+static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val);
+
 bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
     if (argCount != function->arity) {
         std::cout << "[Runtime Error]: Expected " << function->arity << " arguments but got " << argCount << "." << std::endl;
@@ -53,22 +55,7 @@ bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
         if (expected.kind == TypeKind::ANY || expected.kind == TypeKind::UNTYPED) continue;
         Value arg = stack[stack.size() - argCount + i];
 
-        if (expected.kind == TypeKind::FLOAT && arg.isInt()) {
-            // Implicit int -> float coercion allowed
-            stack[stack.size() - argCount + i] = Value(static_cast<double>(arg.intVal));
-            continue;
-        }
-
-        bool matchType = false;
-        if (expected.kind == TypeKind::INT && arg.isInt()) matchType = true;
-        else if (expected.kind == TypeKind::FLOAT && arg.isFloat()) matchType = true;
-        else if (expected.kind == TypeKind::STRING && arg.isString()) matchType = true;
-        else if (expected.kind == TypeKind::BOOL && arg.isBool()) matchType = true;
-        else if (expected.kind == TypeKind::CHAR && arg.isChar()) matchType = true;
-        else if (expected.kind == TypeKind::ARRAY && arg.isArray()) matchType = true;
-        else if (expected.kind == TypeKind::MAP && arg.isMap()) matchType = true;
-
-        if (!matchType) {
+        if (!checkAndCoerceValueType(expected, stack[stack.size() - argCount + i])) {
             std::cout << "[Runtime Error]: Argument " << (i + 1) << " expects type " << expected.toString() << " but got " << arg.getTypeSpec().toString() << "." << std::endl;
             return false;
         }
@@ -81,6 +68,55 @@ bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
     frame.isGrab = isGrab;
     frames.push_back(frame);
     return true;
+}
+
+static std::string trimString(const std::string& str);
+
+static TypeSpec parseTypeSpecString(const std::string& str) {
+    if (str.empty() || str == "any") return TypeSpec{TypeKind::ANY};
+    if (str == "int") return TypeSpec{TypeKind::INT};
+    if (str == "float") return TypeSpec{TypeKind::FLOAT};
+    if (str == "string") return TypeSpec{TypeKind::STRING};
+    if (str == "bool") return TypeSpec{TypeKind::BOOL};
+    if (str == "char") return TypeSpec{TypeKind::CHAR};
+    if (str == "array") return TypeSpec{TypeKind::ARRAY};
+    if (str == "map") return TypeSpec{TypeKind::MAP};
+    if (str.rfind("array<", 0) == 0 && str.back() == '>') {
+        std::string sub = str.substr(6, str.length() - 7);
+        TypeSpec spec;
+        spec.kind = TypeKind::ARRAY;
+        TypeSpec elem = parseTypeSpecString(sub);
+        spec.elementKind = elem.kind;
+        spec.elemType = std::make_shared<TypeSpec>(elem);
+        return spec;
+    }
+    if (str.rfind("map<", 0) == 0 && str.back() == '>') {
+        std::string sub = str.substr(4, str.length() - 5);
+        int angleDepth = 0;
+        size_t comma = std::string::npos;
+        for (size_t i = 0; i < sub.length(); ++i) {
+            if (sub[i] == '<') angleDepth++;
+            else if (sub[i] == '>') angleDepth--;
+            else if (sub[i] == ',' && angleDepth == 0) {
+                comma = i;
+                break;
+            }
+        }
+        if (comma != std::string::npos) {
+            std::string kSub = trimString(sub.substr(0, comma));
+            std::string vSub = trimString(sub.substr(comma + 1));
+            TypeSpec spec;
+            spec.kind = TypeKind::MAP;
+            TypeSpec kSpec = parseTypeSpecString(kSub);
+            TypeSpec vSpec = parseTypeSpecString(vSub);
+            spec.keyKind = kSpec.kind;
+            spec.valueKind = vSpec.kind;
+            spec.keyType = std::make_shared<TypeSpec>(kSpec);
+            spec.valType = std::make_shared<TypeSpec>(vSpec);
+            return spec;
+        }
+    }
+    return TypeSpec{TypeKind::ANY};
 }
 
 static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
@@ -110,28 +146,28 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     if (expected.kind == TypeKind::ARRAY) {
         if (!val.isArray()) return false;
         if (!val.array) return true;
-        val.array->typeSpec = expected;
         if (expected.elementKind != TypeKind::ANY && expected.elementKind != TypeKind::UNTYPED) {
-            TypeSpec elemSpec{expected.elementKind};
+            TypeSpec elemSpec = expected.elemType ? *expected.elemType : TypeSpec{expected.elementKind};
             for (size_t i = 0; i < val.array->elements.size(); ++i) {
                 if (!checkAndCoerceValueType(elemSpec, val.array->elements[i])) {
                     return false;
                 }
             }
         }
+        val.array->typeSpec = expected;
         return true;
     }
     if (expected.kind == TypeKind::MAP) {
         if (!val.isMap()) return false;
         if (!val.map) return true;
-        val.map->typeSpec = expected;
-        TypeSpec keySpec{expected.keyKind != TypeKind::ANY ? expected.keyKind : TypeKind::STRING};
-        TypeSpec valSpec{expected.valueKind};
+        TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind != TypeKind::ANY ? expected.keyKind : TypeKind::STRING};
+        TypeSpec valSpec = expected.valType ? *expected.valType : TypeSpec{expected.valueKind};
         for (auto& pair : val.map->table) {
             Value kVal(pair.first);
             if (!checkAndCoerceValueType(keySpec, kVal)) return false;
             if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
         }
+        val.map->typeSpec = expected;
         return true;
     }
     return true;
@@ -617,7 +653,8 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_DEFINE_GLOBAL_TYPED: {
                 uint16_t index = read16(frame->ip);
-                TypeSpec expected = decodeTypeSpec(read16(frame->ip));
+                uint16_t typeSpecIdx = read16(frame->ip);
+                TypeSpec expected = parseTypeSpecString(frame->function->chunk.constants[typeSpecIdx].str);
                 std::string name = frame->function->chunk.constants[index].str;
                 Value val = pop();
                 if (!checkAndCoerceValueType(expected, val)) {
@@ -631,7 +668,8 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_CHECK_LOCAL_TYPE: {
-                TypeSpec expected = decodeTypeSpec(read16(frame->ip));
+                uint16_t typeSpecIdx = read16(frame->ip);
+                TypeSpec expected = parseTypeSpecString(frame->function->chunk.constants[typeSpecIdx].str);
                 Value val = peek(0);
                 if (!checkAndCoerceValueType(expected, val)) {
                     std::cout << "[Runtime Error]: Type mismatch: expected "
@@ -816,7 +854,7 @@ void VM::run(Chunk& mainChunk) {
                         return;
                     }
                     if (target.map->typeSpec.valueKind != TypeKind::ANY && target.map->typeSpec.valueKind != TypeKind::UNTYPED) {
-                        TypeSpec expectedValSpec{target.map->typeSpec.valueKind};
+                        TypeSpec expectedValSpec = target.map->typeSpec.valType ? *target.map->typeSpec.valType : TypeSpec{target.map->typeSpec.valueKind};
                         if (!checkAndCoerceValueType(expectedValSpec, val)) {
                             std::cout << "[Runtime Error]: Type mismatch for map assignment: expected "
                                       << expectedValSpec.toString() << " but got "
@@ -837,7 +875,7 @@ void VM::run(Chunk& mainChunk) {
                         return;
                     }
                     if (target.array->typeSpec.elementKind != TypeKind::ANY && target.array->typeSpec.elementKind != TypeKind::UNTYPED) {
-                        TypeSpec expectedElemSpec{target.array->typeSpec.elementKind};
+                        TypeSpec expectedElemSpec = target.array->typeSpec.elemType ? *target.array->typeSpec.elemType : TypeSpec{target.array->typeSpec.elementKind};
                         if (!checkAndCoerceValueType(expectedElemSpec, val)) {
                             std::cout << "[Runtime Error]: Type mismatch for array assignment: expected "
                                       << expectedElemSpec.toString() << " but got "

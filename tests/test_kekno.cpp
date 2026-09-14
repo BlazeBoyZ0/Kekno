@@ -308,6 +308,30 @@ static void testV046Patches() {
     std::string out;
 
     // 1. Type checking
+    out = runCodeFresh("task testArr(array<int> nums) { echo nums ~ } testArr([1, 2, 3]) ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2, 3]") != std::string::npos, "typed task param valid array<int>");
+
+    out = runCodeFresh("task testArr(array<int> nums) { echo nums ~ } testArr([1, \"hello\"]) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed task param invalid array<int>");
+
+    out = runCodeFresh("task testMap(map<string, int> data) { echo data ~ } testMap({\"a\": 10}) ~", ok);
+    TEST_ASSERT(ok && out.find("{\"a\": 10}") != std::string::npos, "typed task param valid map<string, int>");
+
+    out = runCodeFresh("task testMap(map<string, int> data) { echo data ~ } testMap({\"a\": \"hello\"}) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed task param invalid map<string, int>");
+
+    out = runCodeFresh("task testNested(array<array<int>> matrix) { echo matrix ~ } testNested([[1, 2], [3, 4]]) ~", ok);
+    TEST_ASSERT(ok && out.find("[[1, 2], [3, 4]]") != std::string::npos, "typed task param valid nested collection");
+
+    out = runCodeFresh("task testNested(array<array<int>> matrix) { echo matrix ~ } testNested([[1, 2], [\"hello\"]]) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed task param invalid nested collection");
+
+    out = runCodeFresh("task testTaskLocal() { let int x = 10 ~ x = \"hello\" ~ } testTaskLocal() ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "task local variable reassignment mismatch error");
+
+    out = runCodeFresh("let array<array<int>> grid = [[1, 2], [3, 4]] ~ grid[0] = [\"hello\"] ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "nested collection index assignment mismatch error");
+
     out = runCodeFresh("let int x = 10 ~ x = \"hello\" ~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed int reassignment mismatch error");
 

@@ -139,7 +139,13 @@ void Compiler::addLocal(const std::string& name, bool isConst, TypeSpec typeSpec
     local.depth = currentContext->scopeDepth;
     local.isConst = isConst;
     local.typeSpec = typeSpec;
+    size_t slot = currentContext->locals.size();
     currentContext->locals.push_back(local);
+
+    if (slot >= chunk().localTypes.size()) {
+        chunk().localTypes.resize(slot + 1, TypeSpec{TypeKind::ANY});
+    }
+    chunk().localTypes[slot] = typeSpec;
 }
 
 int Compiler::resolveLocal(CompilerContext* context, const std::string& name) {
@@ -180,6 +186,7 @@ TypeSpec Compiler::parseTypeDeclaration() {
             advance(); // consume '<'
             TypeSpec elemSpec = parseTypeDeclaration();
             spec.elementKind = elemSpec.kind;
+            spec.elemType = std::make_shared<TypeSpec>(elemSpec);
             consume(TokenType::GREATER, "Expected '>' after array element type");
         }
     } else if (current.type == TokenType::TYPE_MAP) {
@@ -192,6 +199,8 @@ TypeSpec Compiler::parseTypeDeclaration() {
             TypeSpec vSpec = parseTypeDeclaration();
             spec.keyKind = kSpec.kind;
             spec.valueKind = vSpec.kind;
+            spec.keyType = std::make_shared<TypeSpec>(kSpec);
+            spec.valType = std::make_shared<TypeSpec>(vSpec);
             consume(TokenType::GREATER, "Expected '>' after map value type");
         }
     }
@@ -440,7 +449,8 @@ void Compiler::varDeclaration() {
         addLocal(varName, isConst, typeSpec);
         if (typeSpec.kind != TypeKind::ANY && typeSpec.kind != TypeKind::UNTYPED) {
             chunk().writeOp(OpCode::OP_CHECK_LOCAL_TYPE);
-            chunk().write16(encodeTypeSpec(typeSpec));
+            uint16_t typeSpecIdx = addConstant(Value(typeSpec.toString()));
+            chunk().write16(typeSpecIdx);
         }
     } else {
         if (isConst) {
@@ -450,7 +460,8 @@ void Compiler::varDeclaration() {
         if (typeSpec.kind != TypeKind::ANY && typeSpec.kind != TypeKind::UNTYPED) {
             chunk().writeOp(OpCode::OP_DEFINE_GLOBAL_TYPED);
             chunk().write16(nameIdx);
-            chunk().write16(encodeTypeSpec(typeSpec));
+            uint16_t typeSpecIdx = addConstant(Value(typeSpec.toString()));
+            chunk().write16(typeSpecIdx);
         } else {
             chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
             chunk().write16(nameIdx);
@@ -538,10 +549,6 @@ void Compiler::taskDeclaration() {
         chunk().writeOp(OpCode::OP_NIL);
         chunk().writeOp(OpCode::OP_RETURN);
 
-        fn->chunk.localTypes.clear();
-        for (const auto& local : fnContext.locals) {
-            fn->chunk.localTypes.push_back(local.typeSpec);
-        }
         fn->localTypes = fn->chunk.localTypes;
     }
 
@@ -1001,9 +1008,5 @@ bool Compiler::compile() {
     }
     chunk().writeOp(OpCode::OP_RETURN);
 
-    targetChunk.localTypes.clear();
-    for (const auto& local : scriptContext.locals) {
-        targetChunk.localTypes.push_back(local.typeSpec);
-    }
     return !hasError;
 }
