@@ -83,6 +83,60 @@ bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
     return true;
 }
 
+static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
+    if (expected.kind == TypeKind::ANY || expected.kind == TypeKind::UNTYPED) {
+        return true;
+    }
+    if (expected.kind == TypeKind::INT) {
+        return val.isInt();
+    }
+    if (expected.kind == TypeKind::FLOAT) {
+        if (val.isFloat()) return true;
+        if (val.isInt()) {
+            val = Value(static_cast<double>(val.intVal));
+            return true;
+        }
+        return false;
+    }
+    if (expected.kind == TypeKind::STRING) {
+        return val.isString();
+    }
+    if (expected.kind == TypeKind::CHAR) {
+        return val.isChar();
+    }
+    if (expected.kind == TypeKind::BOOL) {
+        return val.isBool();
+    }
+    if (expected.kind == TypeKind::ARRAY) {
+        if (!val.isArray()) return false;
+        if (!val.array) return true;
+        val.array->typeSpec = expected;
+        if (expected.elementKind != TypeKind::ANY && expected.elementKind != TypeKind::UNTYPED) {
+            TypeSpec elemSpec{expected.elementKind};
+            for (size_t i = 0; i < val.array->elements.size(); ++i) {
+                if (!checkAndCoerceValueType(elemSpec, val.array->elements[i])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    if (expected.kind == TypeKind::MAP) {
+        if (!val.isMap()) return false;
+        if (!val.map) return true;
+        val.map->typeSpec = expected;
+        TypeSpec keySpec{expected.keyKind != TypeKind::ANY ? expected.keyKind : TypeKind::STRING};
+        TypeSpec valSpec{expected.valueKind};
+        for (auto& pair : val.map->table) {
+            Value kVal(pair.first);
+            if (!checkAndCoerceValueType(keySpec, kVal)) return false;
+            if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
+        }
+        return true;
+    }
+    return true;
+}
+
 static std::string trimString(const std::string& str) {
     size_t start = 0;
     while (start < str.length() && std::isspace(static_cast<unsigned char>(str[start]))) start++;
@@ -109,7 +163,7 @@ VM::VM() {
         if (!args[0].isMap() || !args[0].map) {
             throw std::runtime_error("[Runtime Error]: keys() expects map as argument.");
         }
-        ArrayPtr arr = std::make_shared<std::vector<Value>>();
+        ArrayPtr arr = std::make_shared<ObjArray>();
         for (const std::string& key : args[0].map->keys) {
             arr->push_back(Value(key));
         }
@@ -121,7 +175,7 @@ VM::VM() {
         if (!args[0].isMap() || !args[0].map) {
             throw std::runtime_error("[Runtime Error]: values() expects map as argument.");
         }
-        ArrayPtr arr = std::make_shared<std::vector<Value>>();
+        ArrayPtr arr = std::make_shared<ObjArray>();
         for (const std::string& key : args[0].map->keys) {
             auto it = args[0].map->table.find(key);
             if (it != args[0].map->table.end()) {
@@ -178,7 +232,15 @@ VM::VM() {
         if (!args[0].isArray() || !args[0].array) {
             throw std::runtime_error("[Runtime Error]: inject() expects array as first argument.");
         }
-        args[0].array->push_back(args[1]);
+        Value val = args[1];
+        if (args[0].array->typeSpec.elementKind != TypeKind::ANY && args[0].array->typeSpec.elementKind != TypeKind::UNTYPED) {
+            TypeSpec expectedElemSpec{args[0].array->typeSpec.elementKind};
+            if (!checkAndCoerceValueType(expectedElemSpec, val)) {
+                throw std::runtime_error("[Runtime Error]: inject() type mismatch: expected " +
+                                           expectedElemSpec.toString() + " but got " + val.getTypeSpec().toString() + ".");
+            }
+        }
+        args[0].array->push_back(val);
         return Value();
     }));
 
@@ -258,6 +320,9 @@ VM::VM() {
                 throw std::runtime_error("[Runtime Error]: Cannot cast NaN or Infinity to int.");
             }
             double rounded = (f >= 0) ? std::floor(f + 0.5) : std::ceil(f - 0.5);
+            if (rounded < -9223372036854775808.0 || rounded >= 9223372036854775808.0) {
+                throw std::runtime_error("[Runtime Error]: Float value out of 64-bit integer range in cast_int().");
+            }
             return Value(static_cast<int64_t>(rounded));
         }
         if (args[0].isBool()) return Value(static_cast<int64_t>(args[0].boolean ? 1 : 0));
@@ -320,7 +385,7 @@ VM::VM() {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_array() expects 1 argument.");
         if (args[0].isArray()) return args[0];
         if (args[0].isString()) {
-            ArrayPtr arr = std::make_shared<std::vector<Value>>();
+            ArrayPtr arr = std::make_shared<ObjArray>();
             for (char c : args[0].str) {
                 arr->push_back(Value(static_cast<char32_t>(c), true));
             }
@@ -380,7 +445,7 @@ VM::VM() {
     globals["split"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: split() expects 2 arguments.");
         if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: split() expects string arguments.");
-        ArrayPtr arr = std::make_shared<std::vector<Value>>();
+        ArrayPtr arr = std::make_shared<ObjArray>();
         std::string str = args[0].str;
         std::string delim = args[1].str;
         if (delim.empty()) {
@@ -514,6 +579,7 @@ void VM::run(Chunk& mainChunk) {
 
     FunctionPtr mainFn = std::make_shared<ObjFunction>();
     mainFn->chunk = mainChunk;
+    mainFn->localTypes = mainChunk.localTypes;
     mainFn->name = "main";
     mainFn->arity = 0;
 
@@ -546,6 +612,34 @@ void VM::run(Chunk& mainChunk) {
                 uint16_t index = read16(frame->ip);
                 std::string name = frame->function->chunk.constants[index].str;
                 globals[name] = pop();
+                globalTypes[name] = TypeSpec{TypeKind::ANY};
+                break;
+            }
+            case OpCode::OP_DEFINE_GLOBAL_TYPED: {
+                uint16_t index = read16(frame->ip);
+                TypeSpec expected = decodeTypeSpec(read16(frame->ip));
+                std::string name = frame->function->chunk.constants[index].str;
+                Value val = pop();
+                if (!checkAndCoerceValueType(expected, val)) {
+                    std::cout << "[Runtime Error]: Type mismatch for global variable '" << name
+                              << "': expected " << expected.toString() << " but got "
+                              << val.getTypeSpec().toString() << "." << std::endl;
+                    return;
+                }
+                globals[name] = val;
+                globalTypes[name] = expected;
+                break;
+            }
+            case OpCode::OP_CHECK_LOCAL_TYPE: {
+                TypeSpec expected = decodeTypeSpec(read16(frame->ip));
+                Value val = peek(0);
+                if (!checkAndCoerceValueType(expected, val)) {
+                    std::cout << "[Runtime Error]: Type mismatch: expected "
+                              << expected.toString() << " but got "
+                              << val.getTypeSpec().toString() << "." << std::endl;
+                    return;
+                }
+                stack.back() = val;
                 break;
             }
             case OpCode::OP_GET_GLOBAL: {
@@ -567,7 +661,20 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: Variable '" << name << "' is not defined." << std::endl;
                     return;
                 }
-                it->second = peek(0);
+                auto typeIt = globalTypes.find(name);
+                if (typeIt != globalTypes.end() && typeIt->second.kind != TypeKind::ANY && typeIt->second.kind != TypeKind::UNTYPED) {
+                    TypeSpec expected = typeIt->second;
+                    Value val = peek(0);
+                    if (!checkAndCoerceValueType(expected, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for variable '" << name
+                                  << "': expected " << expected.toString() << " but got "
+                                  << val.getTypeSpec().toString() << "." << std::endl;
+                        return;
+                    }
+                    it->second = val;
+                } else {
+                    it->second = peek(0);
+                }
                 break;
             }
             case OpCode::OP_GET_LOCAL: {
@@ -577,6 +684,20 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_SET_LOCAL: {
                 uint16_t slot = read16(frame->ip);
+                if (slot < frame->function->localTypes.size()) {
+                    TypeSpec expected = frame->function->localTypes[slot];
+                    if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
+                        Value val = peek(0);
+                        if (!checkAndCoerceValueType(expected, val)) {
+                            std::cout << "[Runtime Error]: Type mismatch for local variable: expected "
+                                      << expected.toString() << " but got "
+                                      << val.getTypeSpec().toString() << "." << std::endl;
+                            return;
+                        }
+                        stack[frame->slotsOffset + slot] = val;
+                        break;
+                    }
+                }
                 stack[frame->slotsOffset + slot] = peek(0);
                 break;
             }
@@ -606,7 +727,7 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_BUILD_ARRAY: {
                 uint16_t elementCount = read16(frame->ip);
-                ArrayPtr arr = std::make_shared<std::vector<Value>>();
+                ArrayPtr arr = std::make_shared<ObjArray>();
                 arr->resize(elementCount);
                 for (int i = elementCount - 1; i >= 0; --i) {
                     (*arr)[i] = pop();
@@ -694,6 +815,15 @@ void VM::run(Chunk& mainChunk) {
                         std::cout << "[Runtime Error]: Invalid map target." << std::endl;
                         return;
                     }
+                    if (target.map->typeSpec.valueKind != TypeKind::ANY && target.map->typeSpec.valueKind != TypeKind::UNTYPED) {
+                        TypeSpec expectedValSpec{target.map->typeSpec.valueKind};
+                        if (!checkAndCoerceValueType(expectedValSpec, val)) {
+                            std::cout << "[Runtime Error]: Type mismatch for map assignment: expected "
+                                      << expectedValSpec.toString() << " but got "
+                                      << val.getTypeSpec().toString() << "." << std::endl;
+                            return;
+                        }
+                    }
                     target.map->set(indexVal.str, val);
                     push(val);
                 } else if (target.isArray()) {
@@ -705,6 +835,15 @@ void VM::run(Chunk& mainChunk) {
                     if (!target.array || index < 0 || index >= static_cast<int64_t>(target.array->size())) {
                         std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
                         return;
+                    }
+                    if (target.array->typeSpec.elementKind != TypeKind::ANY && target.array->typeSpec.elementKind != TypeKind::UNTYPED) {
+                        TypeSpec expectedElemSpec{target.array->typeSpec.elementKind};
+                        if (!checkAndCoerceValueType(expectedElemSpec, val)) {
+                            std::cout << "[Runtime Error]: Type mismatch for array assignment: expected "
+                                      << expectedElemSpec.toString() << " but got "
+                                      << val.getTypeSpec().toString() << "." << std::endl;
+                            return;
+                        }
                     }
                     (*target.array)[index] = val;
                     push(val);
@@ -849,6 +988,10 @@ void VM::run(Chunk& mainChunk) {
                     return;
                 }
                 if (a.isInt() && b.isInt()) {
+                    if (a.intVal == std::numeric_limits<int64_t>::min() && b.intVal == -1) {
+                        std::cout << "[Runtime Error]: 64-bit integer division overflow." << std::endl;
+                        return;
+                    }
                     if (a.intVal % b.intVal == 0) {
                         push(Value(a.intVal / b.intVal));
                     } else {
@@ -871,6 +1014,10 @@ void VM::run(Chunk& mainChunk) {
                     return;
                 }
                 if (a.isInt() && b.isInt()) {
+                    if (a.intVal == std::numeric_limits<int64_t>::min() && b.intVal == -1) {
+                        std::cout << "[Runtime Error]: 64-bit integer modulo overflow." << std::endl;
+                        return;
+                    }
                     push(Value(a.intVal % b.intVal));
                 } else {
                     push(Value(std::fmod(a.asFloat(), b.asFloat())));
@@ -884,11 +1031,44 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: '^' only supports numbers!" << std::endl;
                     return;
                 }
+                if (a.asFloat() == 0.0 && b.asFloat() < 0.0) {
+                    std::cout << "[Runtime Error]: Zero cannot be raised to a negative power." << std::endl;
+                    return;
+                }
                 if (a.isInt() && b.isInt() && b.intVal >= 0) {
-                    double powRes = std::pow(static_cast<double>(a.intVal), static_cast<double>(b.intVal));
-                    push(Value(static_cast<int64_t>(powRes)));
+                    bool overflow = false;
+                    int64_t result = 1;
+                    int64_t base = a.intVal;
+                    int64_t exp = b.intVal;
+
+                    while (exp > 0) {
+                        if (exp & 1) {
+                            if (__builtin_mul_overflow(result, base, &result)) {
+                                overflow = true;
+                                break;
+                            }
+                        }
+                        exp >>= 1;
+                        if (exp > 0) {
+                            if (__builtin_mul_overflow(base, base, &base)) {
+                                overflow = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (overflow) {
+                        std::cout << "[Runtime Error]: 64-bit integer power overflow." << std::endl;
+                        return;
+                    }
+                    push(Value(result));
                 } else {
-                    push(Value(std::pow(a.asFloat(), b.asFloat())));
+                    double powRes = std::pow(a.asFloat(), b.asFloat());
+                    if (std::isinf(powRes) || std::isnan(powRes)) {
+                        std::cout << "[Runtime Error]: Floating point power overflow or invalid result." << std::endl;
+                        return;
+                    }
+                    push(Value(powRes));
                 }
                 break;
             }

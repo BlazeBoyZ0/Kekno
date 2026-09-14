@@ -34,6 +34,7 @@ struct TypeSpec {
 
 struct Value;
 struct ObjMap;
+struct ObjArray;
 
 using NativeFn = std::function<Value(int argCount, Value* args)>;
 
@@ -42,9 +43,27 @@ struct ObjFunction {
     Chunk chunk;
     std::string name;
     std::vector<TypeSpec> paramTypes;
+    std::vector<TypeSpec> localTypes;
 };
 
-using ArrayPtr = std::shared_ptr<std::vector<Value>>;
+struct ObjArray {
+    std::vector<Value> elements;
+    TypeSpec typeSpec{TypeKind::ARRAY};
+
+    size_t size() const { return elements.size(); }
+    bool empty() const { return elements.empty(); }
+    void resize(size_t n) { elements.resize(n); }
+    void push_back(const Value& val) { elements.push_back(val); }
+    Value& back() { return elements.back(); }
+    void pop_back() { elements.pop_back(); }
+    void erase(std::vector<Value>::iterator it) { elements.erase(it); }
+    auto begin() { return elements.begin(); }
+    auto end() { return elements.end(); }
+    Value& operator[](size_t idx) { return elements[idx]; }
+    const Value& operator[](size_t idx) const { return elements[idx]; }
+};
+
+using ArrayPtr = std::shared_ptr<ObjArray>;
 using MapPtr = std::shared_ptr<ObjMap>;
 using FunctionPtr = std::shared_ptr<ObjFunction>;
 
@@ -122,6 +141,7 @@ struct Value {
 struct ObjMap {
     std::unordered_map<std::string, Value> table;
     std::vector<std::string> keys;
+    TypeSpec typeSpec{TypeKind::MAP};
 
     void set(const std::string& key, const Value& val) {
         if (table.find(key) == table.end()) {
@@ -156,6 +176,22 @@ inline bool Value::isFalsey() const {
     if (isArray()) return array == nullptr || array->empty();
     if (isMap()) return map == nullptr || map->table.empty();
     return false;
+}
+
+inline uint16_t encodeTypeSpec(const TypeSpec& spec) {
+    return (static_cast<uint16_t>(spec.kind) << 12) |
+           (static_cast<uint16_t>(spec.elementKind) << 8) |
+           (static_cast<uint16_t>(spec.keyKind) << 4) |
+           static_cast<uint16_t>(spec.valueKind);
+}
+
+inline TypeSpec decodeTypeSpec(uint16_t encoded) {
+    TypeSpec spec;
+    spec.kind = static_cast<TypeKind>((encoded >> 12) & 0x0F);
+    spec.elementKind = static_cast<TypeKind>((encoded >> 8) & 0x0F);
+    spec.keyKind = static_cast<TypeKind>((encoded >> 4) & 0x0F);
+    spec.valueKind = static_cast<TypeKind>(encoded & 0x0F);
+    return spec;
 }
 
 inline std::string TypeSpec::toString() const {
@@ -273,7 +309,7 @@ inline TypeSpec Value::getTypeSpec() const {
     if (isChar()) return TypeSpec{TypeKind::CHAR};
     if (isString()) return TypeSpec{TypeKind::STRING};
     if (isBool()) return TypeSpec{TypeKind::BOOL};
-    if (isArray()) return TypeSpec{TypeKind::ARRAY};
-    if (isMap()) return TypeSpec{TypeKind::MAP};
+    if (isArray()) return array ? array->typeSpec : TypeSpec{TypeKind::ARRAY};
+    if (isMap()) return map ? map->typeSpec : TypeSpec{TypeKind::MAP};
     return TypeSpec{TypeKind::ANY};
 }

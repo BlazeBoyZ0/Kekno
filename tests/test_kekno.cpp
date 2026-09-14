@@ -303,6 +303,81 @@ static void testGrabAndVMState() {
     std::remove("temp_valid.kek");
 }
 
+static void testV046Patches() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Type checking
+    out = runCodeFresh("let int x = 10 ~ x = \"hello\" ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed int reassignment mismatch error");
+
+    out = runCodeFresh("let int x = 3.5 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed int init float mismatch error");
+
+    out = runCodeFresh("let array<int> nums = [1, 2, 3] ~ echo nums ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2, 3]") != std::string::npos, "valid typed array<int>");
+
+    out = runCodeFresh("let array<int> nums = [1, \"hello\"] ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed array<int> content mismatch");
+
+    out = runCodeFresh("let array<int> nums = [1, 2, 3] ~ nums[0] = \"hello\" ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed array<int> index assignment mismatch");
+
+    out = runCodeFresh("let int x = 10 ~ x += 2.5 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed int compound addition mismatch");
+
+    out = runCodeFresh("let int g = 10 ~ g = \"hello\" ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "global int reassignment mismatch");
+
+    out = runCodeFresh("let x = 5 ~ x = \"hello\" ~ x = true ~ echo x ~", ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos, "dynamic variable retains dynamic reassignments");
+
+    out = runCodeFresh("let float f = 10 ~ echo f ~", ok);
+    TEST_ASSERT(ok && out.find("=> 10.0") != std::string::npos, "float variable accepts int via implicit coercion");
+
+    // 2. Char literal crash fix
+    out = runCodeFresh("echo 'A' ~", ok);
+    TEST_ASSERT(ok && out.find("=> A") != std::string::npos, "normal char literal echo");
+
+    out = runCodeFresh("echo '\\z' ~", ok);
+    TEST_ASSERT(!ok && out.find("Syntax Error") != std::string::npos, "malformed char literal gives standard syntax error");
+
+    // 3. Constant pool overflow error handling
+    std::string codeWithConsts = "";
+    for (int i = 0; i < 65537; i++) {
+        codeWithConsts += "let x" + std::to_string(i) + " = " + std::to_string(i) + " ~\n";
+    }
+    out = runCodeFresh(codeWithConsts, ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Constant pool limit exceeded") != std::string::npos, "compiler constant pool overflow caught gracefully");
+
+    // 4. Integer power overflow & zero negative power
+    out = runCodeFresh("echo 2 ^ 63 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "2^63 power overflow error");
+
+    out = runCodeFresh("echo 10 ^ 20 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "10^20 power overflow error");
+
+    out = runCodeFresh("echo 2 ^ 3 ~", ok);
+    TEST_ASSERT(ok && out.find("=> 8") != std::string::npos, "2^3 integer power valid");
+
+    out = runCodeFresh("echo 0 ^ -1 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "0^-1 runtime error");
+
+    // 5. float -> int conversion range check
+    out = runCodeFresh("echo cast_int(1000000000000000000000000000000000000000000.0) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("out of 64-bit integer range") != std::string::npos, "cast_int overflow error");
+
+    out = runCodeFresh("echo cast_int(3.4) ~ echo cast_int(3.5) ~", ok);
+    TEST_ASSERT(ok && out.find("=> 3") != std::string::npos && out.find("=> 4") != std::string::npos, "cast_int rounding preserved");
+
+    // 6. INT64_MIN division / modulo protection
+    out = runCodeFresh("let minVal = -9223372036854775807 - 1 ~ echo minVal / -1 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "INT64_MIN / -1 runtime error");
+
+    out = runCodeFresh("let minVal = -9223372036854775807 - 1 ~ echo minVal % -1 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "INT64_MIN % -1 runtime error");
+}
+
 int main() {
     std::cout << "Running Kekno v0.4.5 Regression Test Suite..." << std::endl;
 
@@ -320,6 +395,7 @@ int main() {
     testDiagnostics();
     test16BitOperandLimits();
     testGrabAndVMState();
+    testV046Patches();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;
