@@ -16,6 +16,7 @@ private:
     std::vector<Value> stack;
     std::vector<CallFrame> frames;
     std::unordered_map<std::string, Value> globals;
+    std::unordered_map<std::string, TypeSpec> globalTypes;
     std::vector<std::unordered_map<std::string, Value>> grabSnapshots;
 
     void push(Value value);

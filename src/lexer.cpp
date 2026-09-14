@@ -118,13 +118,21 @@ Token Lexer::nextToken() {
 
     // Single quotes -> char literal
     if (c == '\'') {
-        advance(); // consume '\''
-        if (peek() == '\0') {
+        size_t tokenStart = current;
+        advance(); // consume opening '\''
+        if (peek() == '\'') {
+            advance(); // consume closing '\''
+            return errorToken("Character literal cannot be empty", startLine, startCol);
+        }
+        if (peek() == '\0' || peek() == '\n') {
             return errorToken("Unterminated character literal", startLine, startCol);
         }
         char32_t charCode = 0;
         if (peek() == '\\') {
             advance(); // consume '\\'
+            if (peek() == '\0' || peek() == '\n') {
+                return errorToken("Unterminated character literal", startLine, startCol);
+            }
             char esc = advance();
             switch (esc) {
                 case 'n': charCode = '\n'; break;
@@ -135,6 +143,8 @@ Token Lexer::nextToken() {
                 case '"': charCode = '"'; break;
                 case '0': charCode = '\0'; break;
                 default:
+                    while (peek() != '\'' && peek() != '\n' && peek() != '\0') advance();
+                    if (peek() == '\'') advance();
                     return errorToken("Invalid escape sequence '\\" + std::string(1, esc) + "' in character literal", startLine, startCol);
             }
         } else {
@@ -143,33 +153,46 @@ Token Lexer::nextToken() {
             if (ch < 0x80) {
                 charCode = ch;
             } else if ((ch & 0xE0) == 0xC0) {
+                if (current >= source.length()) {
+                    return errorToken("Unterminated character literal", startLine, startCol);
+                }
                 char ch2 = advance();
                 charCode = ((ch & 0x1F) << 6) | (ch2 & 0x3F);
             } else if ((ch & 0xF0) == 0xE0) {
+                if (current + 1 >= source.length()) {
+                    return errorToken("Unterminated character literal", startLine, startCol);
+                }
                 char ch2 = advance();
                 char ch3 = advance();
                 charCode = ((ch & 0x0F) << 12) | ((ch2 & 0x3F) << 6) | (ch3 & 0x3F);
             } else if ((ch & 0xF8) == 0xF0) {
+                if (current + 2 >= source.length()) {
+                    return errorToken("Unterminated character literal", startLine, startCol);
+                }
                 char ch2 = advance();
                 char ch3 = advance();
                 char ch4 = advance();
                 charCode = ((ch & 0x07) << 18) | ((ch2 & 0x3F) << 12) | ((ch3 & 0x3F) << 6) | (ch4 & 0x3F);
             } else {
+                while (peek() != '\'' && peek() != '\n' && peek() != '\0') advance();
+                if (peek() == '\'') advance();
                 return errorToken("Invalid UTF-8 sequence in character literal", startLine, startCol);
             }
         }
 
         if (peek() != '\'') {
-            if (peek() == '\0') {
-                return errorToken("Unterminated character literal", startLine, startCol);
+            while (peek() != '\'' && peek() != '\n' && peek() != '\0') advance();
+            if (peek() == '\'') {
+                advance(); // consume closing quote
+                return errorToken("Character literal must contain exactly one character", startLine, startCol);
             }
-            return errorToken("Character literal must contain exactly one character", startLine, startCol);
+            return errorToken("Unterminated character literal", startLine, startCol);
         }
         advance(); // consume ending '\''
 
         Token t;
         t.type = TokenType::CHAR_LITERAL;
-        t.text = source.substr(source.find('\'', current - 10 > 0 ? current - 10 : 0), current); // token text
+        t.text = source.substr(tokenStart, current - tokenStart);
         t.charValue = charCode;
         t.line = startLine;
         t.column = startCol;

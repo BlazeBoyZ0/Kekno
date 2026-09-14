@@ -57,6 +57,7 @@ private:
     void advance();
     bool match(TokenType type);
     void consume(TokenType type, const std::string& errMsg);
+    uint16_t addConstant(Value value);
     void emitConstant(Value value);
 
     int emitJump(OpCode op);

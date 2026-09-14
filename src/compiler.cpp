@@ -62,14 +62,19 @@ void Compiler::consume(TokenType type, const std::string& errMsg) {
     }
 }
 
-void Compiler::emitConstant(Value value) {
-    chunk().writeOp(OpCode::OP_CONSTANT);
+uint16_t Compiler::addConstant(Value value) {
     try {
-        uint16_t idx = chunk().addConstant(value);
-        chunk().write16(idx);
+        return chunk().addConstant(value);
     } catch (const std::exception& ex) {
         error(ex.what(), "Compiler Error");
+        return 0;
     }
+}
+
+void Compiler::emitConstant(Value value) {
+    chunk().writeOp(OpCode::OP_CONSTANT);
+    uint16_t idx = addConstant(value);
+    chunk().write16(idx);
 }
 
 int Compiler::emitJump(OpCode op) {
@@ -224,7 +229,7 @@ void Compiler::primary() {
             chunk().writeOp(OpCode::OP_GET_LOCAL);
             chunk().write16(static_cast<uint16_t>(localSlot));
         } else {
-            uint16_t nameIdx = chunk().addConstant(Value(name));
+            uint16_t nameIdx = addConstant(Value(name));
             chunk().writeOp(OpCode::OP_GET_GLOBAL);
             chunk().write16(nameIdx);
         }
@@ -433,13 +438,23 @@ void Compiler::varDeclaration() {
 
     if (currentContext->scopeDepth > 0) {
         addLocal(varName, isConst, typeSpec);
+        if (typeSpec.kind != TypeKind::ANY && typeSpec.kind != TypeKind::UNTYPED) {
+            chunk().writeOp(OpCode::OP_CHECK_LOCAL_TYPE);
+            chunk().write16(encodeTypeSpec(typeSpec));
+        }
     } else {
         if (isConst) {
             globalConsts[varName] = true;
         }
-        uint16_t nameIdx = chunk().addConstant(Value(varName));
-        chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
-        chunk().write16(nameIdx);
+        uint16_t nameIdx = addConstant(Value(varName));
+        if (typeSpec.kind != TypeKind::ANY && typeSpec.kind != TypeKind::UNTYPED) {
+            chunk().writeOp(OpCode::OP_DEFINE_GLOBAL_TYPED);
+            chunk().write16(nameIdx);
+            chunk().write16(encodeTypeSpec(typeSpec));
+        } else {
+            chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
+            chunk().write16(nameIdx);
+        }
     }
 }
 
@@ -522,18 +537,24 @@ void Compiler::taskDeclaration() {
         // Implicit default return nil
         chunk().writeOp(OpCode::OP_NIL);
         chunk().writeOp(OpCode::OP_RETURN);
+
+        fn->chunk.localTypes.clear();
+        for (const auto& local : fnContext.locals) {
+            fn->chunk.localTypes.push_back(local.typeSpec);
+        }
+        fn->localTypes = fn->chunk.localTypes;
     }
 
     if (hasError) return;
 
-    uint16_t fnConstantIdx = chunk().addConstant(Value(fn));
+    uint16_t fnConstantIdx = addConstant(Value(fn));
     chunk().writeOp(OpCode::OP_CONSTANT);
     chunk().write16(fnConstantIdx);
 
     if (currentContext->scopeDepth > 0) {
         addLocal(fnName, false, TypeSpec{TypeKind::ANY});
     } else {
-        uint16_t nameIdx = chunk().addConstant(Value(fnName));
+        uint16_t nameIdx = addConstant(Value(fnName));
         chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
         chunk().write16(nameIdx);
     }
@@ -979,5 +1000,10 @@ bool Compiler::compile() {
         statement();
     }
     chunk().writeOp(OpCode::OP_RETURN);
+
+    targetChunk.localTypes.clear();
+    for (const auto& local : scriptContext.locals) {
+        targetChunk.localTypes.push_back(local.typeSpec);
+    }
     return !hasError;
 }

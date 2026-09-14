@@ -7,6 +7,8 @@ enum class OpCode : uint8_t {
     OP_TRUE,
     OP_FALSE,
     OP_DEFINE_GLOBAL,
+    OP_DEFINE_GLOBAL_TYPED,
+    OP_CHECK_LOCAL_TYPE,
     OP_GET_GLOBAL,
     OP_SET_GLOBAL,
     OP_GET_LOCAL,
