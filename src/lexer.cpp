@@ -328,6 +328,7 @@ Token Lexer::nextToken() {
         else if (ident == "char") t.type = TokenType::TYPE_CHAR;
         else if (ident == "array") t.type = TokenType::TYPE_ARRAY;
         else if (ident == "map") t.type = TokenType::TYPE_MAP;
+        else if (ident == "func") t.type = TokenType::TYPE_FUNC;
         else t.type = TokenType::IDENTIFIER;
 
         return t;
@@ -341,11 +342,13 @@ Token Lexer::nextToken() {
 
     switch (c) {
         case '+':
-            if (match('=')) { t.type = TokenType::PLUS_EQUAL; t.text = "+="; }
+            if (match('+')) { t.type = TokenType::PLUS_PLUS; t.text = "++"; }
+            else if (match('=')) { t.type = TokenType::PLUS_EQUAL; t.text = "+="; }
             else { t.type = TokenType::PLUS; }
             break;
         case '-':
-            if (match('=')) { t.type = TokenType::MINUS_EQUAL; t.text = "-="; }
+            if (match('-')) { t.type = TokenType::MINUS_MINUS; t.text = "--"; }
+            else if (match('=')) { t.type = TokenType::MINUS_EQUAL; t.text = "-="; }
             else { t.type = TokenType::MINUS; }
             break;
         case '*':

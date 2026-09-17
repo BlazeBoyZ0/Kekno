@@ -5,7 +5,7 @@
 #include "value.h"
 
 struct CallFrame {
-    FunctionPtr function;
+    ClosurePtr closure;
     const uint8_t* ip = nullptr;
     size_t slotsOffset = 0;
     bool isGrab = false;
@@ -18,12 +18,15 @@ private:
     std::unordered_map<std::string, Value> globals;
     std::unordered_map<std::string, TypeSpec> globalTypes;
     std::vector<std::unordered_map<std::string, Value>> grabSnapshots;
+    UpvaluePtr openUpvalues = nullptr;
 
     void push(Value value);
     Value pop();
     Value peek(int distance);
 
-    bool call(FunctionPtr function, int argCount, bool isGrab = false);
+    bool call(ClosurePtr closure, int argCount, bool isGrab = false);
+    UpvaluePtr captureUpvalue(size_t stackIndex);
+    void closeUpvalues(size_t lastSlotIndex);
 
 public:
     VM();

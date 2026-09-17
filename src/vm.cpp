@@ -35,13 +35,16 @@ Value VM::peek(int distance) {
 void VM::resetStack() {
     stack.clear();
     frames.clear();
+    openUpvalues = nullptr;
 }
 
 static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val);
 
-bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
+bool VM::call(ClosurePtr closure, int argCount, bool isGrab) {
+    FunctionPtr function = closure->function;
+    std::string nameStr = (function && !function->name.empty()) ? "Task '" + function->name + "' " : "Task ";
     if (argCount != function->arity) {
-        std::cout << "[Runtime Error]: Expected " << function->arity << " arguments but got " << argCount << "." << std::endl;
+        std::cout << "[Runtime Error]: " << nameStr << "expected " << function->arity << " arguments but got " << argCount << "." << std::endl;
         return false;
     }
     if (frames.size() >= 65536) {
@@ -56,18 +59,52 @@ bool VM::call(FunctionPtr function, int argCount, bool isGrab) {
         Value arg = stack[stack.size() - argCount + i];
 
         if (!checkAndCoerceValueType(expected, stack[stack.size() - argCount + i])) {
-            std::cout << "[Runtime Error]: Argument " << (i + 1) << " expects type " << expected.toString() << " but got " << arg.getTypeSpec().toString() << "." << std::endl;
+            std::cout << "[Runtime Error]: " << nameStr << "argument " << (i + 1) << " expects type " << expected.toString() << " but got " << arg.getTypeSpec().toString() << "." << std::endl;
             return false;
         }
     }
 
     CallFrame frame;
-    frame.function = function;
+    frame.closure = closure;
     frame.ip = function->chunk.code.data();
     frame.slotsOffset = stack.size() - argCount - 1;
     frame.isGrab = isGrab;
     frames.push_back(frame);
     return true;
+}
+
+UpvaluePtr VM::captureUpvalue(size_t stackIndex) {
+    UpvaluePtr prevUpvalue = nullptr;
+    UpvaluePtr upvalue = openUpvalues;
+    while (upvalue != nullptr && upvalue->stackIndex > stackIndex) {
+        prevUpvalue = upvalue;
+        upvalue = upvalue->next;
+    }
+
+    if (upvalue != nullptr && upvalue->stackIndex == stackIndex) {
+        return upvalue;
+    }
+
+    UpvaluePtr created = std::make_shared<ObjUpvalue>();
+    created->stackIndex = stackIndex;
+    created->next = upvalue;
+
+    if (prevUpvalue == nullptr) {
+        openUpvalues = created;
+    } else {
+        prevUpvalue->next = created;
+    }
+
+    return created;
+}
+
+void VM::closeUpvalues(size_t lastSlotIndex) {
+    while (openUpvalues != nullptr && openUpvalues->stackIndex >= lastSlotIndex) {
+        UpvaluePtr upvalue = openUpvalues;
+        upvalue->closed = stack[upvalue->stackIndex];
+        upvalue->isClosed = true;
+        openUpvalues = upvalue->next;
+    }
 }
 
 static std::string trimString(const std::string& str);
@@ -81,6 +118,7 @@ static TypeSpec parseTypeSpecString(const std::string& str) {
     if (str == "char") return TypeSpec{TypeKind::CHAR};
     if (str == "array") return TypeSpec{TypeKind::ARRAY};
     if (str == "map") return TypeSpec{TypeKind::MAP};
+    if (str == "func") return TypeSpec{TypeKind::FUNC};
     if (str.rfind("array<", 0) == 0 && str.back() == '>') {
         std::string sub = str.substr(6, str.length() - 7);
         TypeSpec spec;
@@ -142,6 +180,9 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     }
     if (expected.kind == TypeKind::BOOL) {
         return val.isBool();
+    }
+    if (expected.kind == TypeKind::FUNC) {
+        return val.isFunction() || val.isNative();
     }
     if (expected.kind == TypeKind::ARRAY) {
         if (!val.isArray()) return false;
@@ -619,8 +660,11 @@ void VM::run(Chunk& mainChunk) {
     mainFn->name = "main";
     mainFn->arity = 0;
 
-    push(Value(mainFn));
-    call(mainFn, 0);
+    ClosurePtr mainClosure = std::make_shared<ObjClosure>();
+    mainClosure->function = mainFn;
+
+    push(Value(mainClosure));
+    call(mainClosure, 0);
 
     CallFrame* frame = &frames.back();
 
@@ -629,7 +673,7 @@ void VM::run(Chunk& mainChunk) {
         switch (instruction) {
             case OpCode::OP_CONSTANT: {
                 uint16_t index = read16(frame->ip);
-                push(frame->function->chunk.constants[index]);
+                push(frame->closure->function->chunk.constants[index]);
                 break;
             }
             case OpCode::OP_NIL: {
@@ -646,7 +690,7 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_DEFINE_GLOBAL: {
                 uint16_t index = read16(frame->ip);
-                std::string name = frame->function->chunk.constants[index].str;
+                std::string name = frame->closure->function->chunk.constants[index].str;
                 globals[name] = pop();
                 globalTypes[name] = TypeSpec{TypeKind::ANY};
                 break;
@@ -654,8 +698,8 @@ void VM::run(Chunk& mainChunk) {
             case OpCode::OP_DEFINE_GLOBAL_TYPED: {
                 uint16_t index = read16(frame->ip);
                 uint16_t typeSpecIdx = read16(frame->ip);
-                TypeSpec expected = parseTypeSpecString(frame->function->chunk.constants[typeSpecIdx].str);
-                std::string name = frame->function->chunk.constants[index].str;
+                TypeSpec expected = parseTypeSpecString(frame->closure->function->chunk.constants[typeSpecIdx].str);
+                std::string name = frame->closure->function->chunk.constants[index].str;
                 Value val = pop();
                 if (!checkAndCoerceValueType(expected, val)) {
                     std::cout << "[Runtime Error]: Type mismatch for global variable '" << name
@@ -669,7 +713,7 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_CHECK_LOCAL_TYPE: {
                 uint16_t typeSpecIdx = read16(frame->ip);
-                TypeSpec expected = parseTypeSpecString(frame->function->chunk.constants[typeSpecIdx].str);
+                TypeSpec expected = parseTypeSpecString(frame->closure->function->chunk.constants[typeSpecIdx].str);
                 Value val = peek(0);
                 if (!checkAndCoerceValueType(expected, val)) {
                     std::cout << "[Runtime Error]: Type mismatch: expected "
@@ -682,7 +726,7 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_GET_GLOBAL: {
                 uint16_t index = read16(frame->ip);
-                std::string name = frame->function->chunk.constants[index].str;
+                std::string name = frame->closure->function->chunk.constants[index].str;
                 auto it = globals.find(name);
                 if (it == globals.end()) {
                     std::cout << "[Runtime Error]: Undefined variable '" << name << "'" << std::endl;
@@ -693,7 +737,7 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_SET_GLOBAL: {
                 uint16_t index = read16(frame->ip);
-                std::string name = frame->function->chunk.constants[index].str;
+                std::string name = frame->closure->function->chunk.constants[index].str;
                 auto it = globals.find(name);
                 if (it == globals.end()) {
                     std::cout << "[Runtime Error]: Variable '" << name << "' is not defined." << std::endl;
@@ -722,8 +766,8 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_SET_LOCAL: {
                 uint16_t slot = read16(frame->ip);
-                if (slot < frame->function->localTypes.size()) {
-                    TypeSpec expected = frame->function->localTypes[slot];
+                if (slot < frame->closure->function->localTypes.size()) {
+                    TypeSpec expected = frame->closure->function->localTypes[slot];
                     if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
                         Value val = peek(0);
                         if (!checkAndCoerceValueType(expected, val)) {
@@ -739,11 +783,89 @@ void VM::run(Chunk& mainChunk) {
                 stack[frame->slotsOffset + slot] = peek(0);
                 break;
             }
+            case OpCode::OP_GET_UPVALUE: {
+                uint16_t slot = read16(frame->ip);
+                push(*frame->closure->upvalues[slot]->getValuePtr(stack));
+                break;
+            }
+            case OpCode::OP_SET_UPVALUE: {
+                uint16_t slot = read16(frame->ip);
+                UpvaluePtr upvalue = frame->closure->upvalues[slot];
+                Value val = peek(0);
+                if (upvalue->typeSpec.kind != TypeKind::ANY && upvalue->typeSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(upvalue->typeSpec, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for variable: expected "
+                                  << upvalue->typeSpec.toString() << " but got "
+                                  << val.getTypeSpec().toString() << "." << std::endl;
+                        return;
+                    }
+                }
+                *upvalue->getValuePtr(stack) = val;
+                break;
+            }
+            case OpCode::OP_CLOSURE: {
+                uint16_t constantIdx = read16(frame->ip);
+                FunctionPtr fn = frame->closure->function->chunk.constants[constantIdx].function;
+                ClosurePtr closure = std::make_shared<ObjClosure>();
+                closure->function = fn;
+                for (int i = 0; i < fn->upvalueCount; i++) {
+                    uint8_t isLocal = *frame->ip++;
+                    uint16_t index = read16(frame->ip);
+                    if (isLocal) {
+                        closure->upvalues.push_back(captureUpvalue(frame->slotsOffset + index));
+                    } else {
+                        closure->upvalues.push_back(frame->closure->upvalues[index]);
+                    }
+                }
+                push(Value(closure));
+                break;
+            }
+            case OpCode::OP_CLOSE_UPVALUE: {
+                if (!stack.empty()) {
+                    closeUpvalues(stack.size() - 1);
+                }
+                pop();
+                break;
+            }
+            case OpCode::OP_INC: {
+                Value val = pop();
+                if (val.isInt()) {
+                    int64_t res;
+                    if (__builtin_add_overflow(val.intVal, 1, &res)) {
+                        std::cout << "[Runtime Error]: 64-bit integer addition overflow." << std::endl;
+                        return;
+                    }
+                    push(Value(res));
+                } else if (val.isFloat()) {
+                    push(Value(val.floatVal + 1.0));
+                } else {
+                    std::cout << "[Runtime Error]: '++' operand must be a number!" << std::endl;
+                    return;
+                }
+                break;
+            }
+            case OpCode::OP_DEC: {
+                Value val = pop();
+                if (val.isInt()) {
+                    int64_t res;
+                    if (__builtin_sub_overflow(val.intVal, 1, &res)) {
+                        std::cout << "[Runtime Error]: 64-bit integer subtraction overflow." << std::endl;
+                        return;
+                    }
+                    push(Value(res));
+                } else if (val.isFloat()) {
+                    push(Value(val.floatVal - 1.0));
+                } else {
+                    std::cout << "[Runtime Error]: '--' operand must be a number!" << std::endl;
+                    return;
+                }
+                break;
+            }
             case OpCode::OP_CALL: {
                 uint16_t argCount = read16(frame->ip);
                 Value callee = peek(argCount);
                 if (callee.isFunction()) {
-                    if (!call(callee.function, argCount)) {
+                    if (!call(callee.closure, argCount)) {
                         return;
                     }
                     frame = &frames.back();
@@ -758,7 +880,61 @@ void VM::run(Chunk& mainChunk) {
                         return;
                     }
                 } else {
-                    std::cout << "[Runtime Error]: Can only call functions." << std::endl;
+                    std::cout << "[Runtime Error]: Can only call task values (got type " << callee.getTypeSpec().toString() << ")." << std::endl;
+                    return;
+                }
+                break;
+            }
+            case OpCode::OP_SET_INDEX_POST: {
+                Value val = pop();
+                Value indexVal = pop();
+                Value target = pop();
+
+                if (target.isMap()) {
+                    if (!indexVal.isString()) {
+                        std::cout << "[Runtime Error]: Map key must be a string." << std::endl;
+                        return;
+                    }
+                    if (!target.map) {
+                        std::cout << "[Runtime Error]: Invalid map target." << std::endl;
+                        return;
+                    }
+                    Value oldVal = target.map->table.count(indexVal.str) ? target.map->table[indexVal.str] : Value();
+                    if (target.map->typeSpec.valueKind != TypeKind::ANY && target.map->typeSpec.valueKind != TypeKind::UNTYPED) {
+                        TypeSpec expectedValSpec = target.map->typeSpec.valType ? *target.map->typeSpec.valType : TypeSpec{target.map->typeSpec.valueKind};
+                        if (!checkAndCoerceValueType(expectedValSpec, val)) {
+                            std::cout << "[Runtime Error]: Type mismatch for map assignment: expected "
+                                      << expectedValSpec.toString() << " but got "
+                                      << val.getTypeSpec().toString() << "." << std::endl;
+                            return;
+                        }
+                    }
+                    target.map->set(indexVal.str, val);
+                    push(oldVal);
+                } else if (target.isArray()) {
+                    if (!indexVal.isInt()) {
+                        std::cout << "[Runtime Error]: Array index must be an integer." << std::endl;
+                        return;
+                    }
+                    int64_t index = indexVal.intVal;
+                    if (!target.array || index < 0 || index >= static_cast<int64_t>(target.array->size())) {
+                        std::cout << "[Runtime Error]: Array index " << index << " out of bounds." << std::endl;
+                        return;
+                    }
+                    Value oldVal = (*target.array)[index];
+                    if (target.array->typeSpec.elementKind != TypeKind::ANY && target.array->typeSpec.elementKind != TypeKind::UNTYPED) {
+                        TypeSpec expectedElemSpec = target.array->typeSpec.elemType ? *target.array->typeSpec.elemType : TypeSpec{target.array->typeSpec.elementKind};
+                        if (!checkAndCoerceValueType(expectedElemSpec, val)) {
+                            std::cout << "[Runtime Error]: Type mismatch for array assignment: expected "
+                                      << expectedElemSpec.toString() << " but got "
+                                      << val.getTypeSpec().toString() << "." << std::endl;
+                            return;
+                        }
+                    }
+                    (*target.array)[index] = val;
+                    push(oldVal);
+                } else {
+                    std::cout << "[Runtime Error]: Only arrays and maps support index assignment." << std::endl;
                     return;
                 }
                 break;
@@ -914,9 +1090,11 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: Could not compile grab file \"" << pathVal.str << "\"." << std::endl;
                     return;
                 }
+                ClosurePtr grabClosure = std::make_shared<ObjClosure>();
+                grabClosure->function = grabFn;
                 grabSnapshots.push_back(globals);
-                push(Value(grabFn));
-                if (!call(grabFn, 0, true)) {
+                push(Value(grabClosure));
+                if (!call(grabClosure, 0, true)) {
                     return;
                 }
                 frame = &frames.back();
@@ -1156,6 +1334,7 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_RETURN: {
                 Value result = pop();
+                closeUpvalues(frame->slotsOffset);
                 size_t slotsOffset = frame->slotsOffset;
                 bool wasGrab = frame->isGrab;
                 frames.pop_back();

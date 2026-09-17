@@ -402,8 +402,165 @@ static void testV046Patches() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "INT64_MIN % -1 runtime error");
 }
 
+static void testV050Features() {
+    bool ok = false;
+    std::string out;
+
+    // 1. func type parameter & function values
+    std::string funcCode =
+        "task add(int a, int b) {\n"
+        "    give a + b~\n"
+        "}\n"
+        "task run(func f, int x, int y) {\n"
+        "    give f(x, y)~\n"
+        "}\n"
+        "let f = add~\n"
+        "echo run(f, 10, 20)~\n";
+    out = runCodeFresh(funcCode, ok);
+    TEST_ASSERT(ok && out.find("=> 30") != std::string::npos, "func parameter and call");
+
+    // Invalid func parameter type rejection
+    out = runCodeFresh("task run(func f) { give f()~ } run(123)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("expects type func") != std::string::npos, "func param type mismatch error");
+
+    // Calling non-task value error
+    out = runCodeFresh("let x = 100~ x()~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Can only call task values") != std::string::npos, "call non-task error");
+
+    // 2. Closures outliving parent function
+    std::string adderCode =
+        "task makeAdder(int x) {\n"
+        "    task add(int y) {\n"
+        "        give x + y~\n"
+        "    }\n"
+        "    give add~\n"
+        "}\n"
+        "let add5 = makeAdder(5)~\n"
+        "echo add5(10)~\n";
+    out = runCodeFresh(adderCode, ok);
+    TEST_ASSERT(ok && out.find("=> 15") != std::string::npos, "closure outliving parent function frame");
+
+    // Independent closures
+    std::string indepCode =
+        "task makeAdder(int x) {\n"
+        "    task add(int y) {\n"
+        "        give x + y~\n"
+        "    }\n"
+        "    give add~\n"
+        "}\n"
+        "let a = makeAdder(5)~\n"
+        "let b = makeAdder(20)~\n"
+        "echo a(1)~\n"
+        "echo b(1)~\n";
+    out = runCodeFresh(indepCode, ok);
+    TEST_ASSERT(ok && out.find("=> 6") != std::string::npos && out.find("=> 21") != std::string::npos, "multiple independent closures");
+
+    // Captured variable mutation & sharing
+    std::string counterCode =
+        "task makeCounter() {\n"
+        "    let count = 0~\n"
+        "    task inc() {\n"
+        "        count++~\n"
+        "        give count~\n"
+        "    }\n"
+        "    give inc~\n"
+        "}\n"
+        "let c = makeCounter()~\n"
+        "echo c()~\n"
+        "echo c()~\n"
+        "echo c()~\n";
+    out = runCodeFresh(counterCode, ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos && out.find("=> 2") != std::string::npos && out.find("=> 3") != std::string::npos, "captured variable mutation");
+
+    // Shared upvalue across multiple closures
+    std::string sharedUpvalueCode =
+        "task makePair() {\n"
+        "    let x = 10~\n"
+        "    task get() { give x~ }\n"
+        "    task set(v) { x = v~ }\n"
+        "    give [get, set]~\n"
+        "}\n"
+        "let pair = makePair()~\n"
+        "let getter = pair[0]~\n"
+        "let setter = pair[1]~\n"
+        "echo getter()~\n"
+        "setter(42)~\n"
+        "echo getter()~\n";
+    out = runCodeFresh(sharedUpvalueCode, ok);
+    TEST_ASSERT(ok && out.find("=> 10") != std::string::npos && out.find("=> 42") != std::string::npos, "shared upvalue mutation across closures");
+
+    // Nested closures (3 levels)
+    std::string nestedClosureCode =
+        "task level1(a) {\n"
+        "    task level2(b) {\n"
+        "        task level3(c) {\n"
+        "            give a + b + c~\n"
+        "        }\n"
+        "        give level3~\n"
+        "    }\n"
+        "    give level2~\n"
+        "}\n"
+        "echo level1(10)(20)(30)~\n";
+    out = runCodeFresh(nestedClosureCode, ok);
+    TEST_ASSERT(ok && out.find("=> 60") != std::string::npos, "3 level nested closures");
+
+    // Nested function recursion
+    std::string nestedRecCode =
+        "task outer() {\n"
+        "    task inner(int n) {\n"
+        "        if (n <= 0) {\n"
+        "            give 0~\n"
+        "        }\n"
+        "        give inner(n - 1)~\n"
+        "    }\n"
+        "    give inner(3)~\n"
+        "}\n"
+        "echo outer()~\n";
+    out = runCodeFresh(nestedRecCode, ok);
+    TEST_ASSERT(ok && out.find("=> 0") != std::string::npos, "nested function recursion");
+
+    // 3. Prefix & Postfix Increment/Decrement
+    out = runCodeFresh("let x = 5~ echo x++~ echo x~", ok);
+    TEST_ASSERT(ok && out.find("=> 5") != std::string::npos && out.find("=> 6") != std::string::npos, "postfix ++ returns old value and increments");
+
+    out = runCodeFresh("let x = 5~ echo ++x~ echo x~", ok);
+    TEST_ASSERT(ok && out.find("=> 6") != std::string::npos, "prefix ++ returns new value and increments");
+
+    out = runCodeFresh("let x = 5~ echo x--~ echo x~", ok);
+    TEST_ASSERT(ok && out.find("=> 5") != std::string::npos && out.find("=> 4") != std::string::npos, "postfix -- returns old value and decrements");
+
+    out = runCodeFresh("let x = 5~ echo --x~ echo x~", ok);
+    TEST_ASSERT(ok && out.find("=> 4") != std::string::npos, "prefix -- returns new value and decrements");
+
+    // Float increment/decrement
+    out = runCodeFresh("let float f = 2.5~ f++~ echo f~", ok);
+    TEST_ASSERT(ok && out.find("=> 3.5") != std::string::npos, "float ++");
+
+    // Index increment/decrement (array and map)
+    out = runCodeFresh("let arr = [10, 20]~ echo arr[0]++~ echo arr[0]~", ok);
+    TEST_ASSERT(ok && out.find("=> 10") != std::string::npos && out.find("=> 11") != std::string::npos, "array element postfix ++");
+
+    out = runCodeFresh("let arr = [10, 20]~ echo ++arr[1]~ echo arr[1]~", ok);
+    TEST_ASSERT(ok && out.find("=> 21") != std::string::npos, "array element prefix ++");
+
+    out = runCodeFresh("let m = {\"a\": 5}~ m[\"a\"]++~ echo m[\"a\"]~", ok);
+    TEST_ASSERT(ok && out.find("=> 6") != std::string::npos, "map element postfix ++");
+
+    // Const increment error
+    out = runCodeFresh("const int c = 10~ c++~", ok);
+    TEST_ASSERT(!ok && out.find("Cannot reassign constant") != std::string::npos, "const increment compiler error");
+
+    // Invalid operand type for ++
+    out = runCodeFresh("let s = \"hello\"~ s++~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("'++' operand must be a number") != std::string::npos, "non-numeric ++ runtime error");
+
+    // Integer overflow on ++
+    out = runCodeFresh("let int maxVal = 9223372036854775807~ maxVal++~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "integer overflow ++ runtime error");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.4.5 Regression Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.5.0 Regression Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -420,6 +577,7 @@ int main() {
     test16BitOperandLimits();
     testGrabAndVMState();
     testV046Patches();
+    testV050Features();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

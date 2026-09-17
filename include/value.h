@@ -13,7 +13,7 @@
 enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE };
 
 enum class TypeKind {
-    ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED
+    ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC
 };
 
 struct TypeSpec {
@@ -46,16 +46,14 @@ struct TypeSpec {
 struct Value;
 struct ObjMap;
 struct ObjArray;
+struct ObjUpvalue;
+struct ObjFunction;
+struct ObjClosure;
 
+using UpvaluePtr = std::shared_ptr<ObjUpvalue>;
+using FunctionPtr = std::shared_ptr<ObjFunction>;
+using ClosurePtr = std::shared_ptr<ObjClosure>;
 using NativeFn = std::function<Value(int argCount, Value* args)>;
-
-struct ObjFunction {
-    int arity = 0;
-    Chunk chunk;
-    std::string name;
-    std::vector<TypeSpec> paramTypes;
-    std::vector<TypeSpec> localTypes;
-};
 
 struct ObjArray {
     std::vector<Value> elements;
@@ -88,20 +86,22 @@ struct Value {
     std::string str;
     bool boolean;
     FunctionPtr function;
+    ClosurePtr closure;
     ArrayPtr array;
     MapPtr map;
     NativeFn nativeFn;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(FunctionPtr fn) : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(fn), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), array(arr), map(nullptr), nativeFn(nullptr) {}
-    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), array(nullptr), map(m), nativeFn(nullptr) {}
-    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), array(nullptr), map(nullptr), nativeFn(nfn) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value(FunctionPtr fn);
+    Value(ClosurePtr cl);
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr) {}
+    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -137,7 +137,7 @@ struct Value {
             case ValueType::FLOAT: return floatVal == other.floatVal;
             case ValueType::CHAR: return charVal == other.charVal;
             case ValueType::STRING: return str == other.str;
-            case ValueType::FUNCTION: return function == other.function;
+            case ValueType::FUNCTION: return closure == other.closure;
             case ValueType::ARRAY: return array == other.array;
             case ValueType::MAP: return map == other.map;
             case ValueType::NATIVE: return false;
@@ -147,6 +147,33 @@ struct Value {
 
     std::string toString() const;
     TypeSpec getTypeSpec() const;
+};
+
+struct ObjUpvalue {
+    size_t stackIndex = 0;
+    Value closed;
+    bool isClosed = false;
+    TypeSpec typeSpec;
+    bool isConst = false;
+    std::shared_ptr<ObjUpvalue> next = nullptr;
+
+    Value* getValuePtr(std::vector<Value>& stack) {
+        return isClosed ? &closed : &stack[stackIndex];
+    }
+};
+
+struct ObjFunction {
+    int arity = 0;
+    int upvalueCount = 0;
+    Chunk chunk;
+    std::string name;
+    std::vector<TypeSpec> paramTypes;
+    std::vector<TypeSpec> localTypes;
+};
+
+struct ObjClosure {
+    FunctionPtr function;
+    std::vector<UpvaluePtr> upvalues;
 };
 
 struct ObjMap {
@@ -176,6 +203,14 @@ struct ObjMap {
         return false;
     }
 };
+
+inline Value::Value(FunctionPtr fn)
+    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(fn), closure(std::make_shared<ObjClosure>()), array(nullptr), map(nullptr), nativeFn(nullptr) {
+    closure->function = fn;
+}
+
+inline Value::Value(ClosurePtr cl)
+    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(cl ? cl->function : nullptr), closure(cl), array(nullptr), map(nullptr), nativeFn(nullptr) {}
 
 inline bool Value::isFalsey() const {
     if (isNil()) return true;
@@ -233,6 +268,7 @@ inline std::string TypeSpec::toString() const {
                 return "map<" + kSpec.toString() + ", " + vSpec.toString() + ">";
             }
             return "map";
+        case TypeKind::FUNC: return "func";
         case TypeKind::UNTYPED: return "untyped";
     }
     return "any";
@@ -330,5 +366,6 @@ inline TypeSpec Value::getTypeSpec() const {
     if (isBool()) return TypeSpec{TypeKind::BOOL};
     if (isArray()) return array ? array->typeSpec : TypeSpec{TypeKind::ARRAY};
     if (isMap()) return map ? map->typeSpec : TypeSpec{TypeKind::MAP};
+    if (isFunction() || isNative()) return TypeSpec{TypeKind::FUNC};
     return TypeSpec{TypeKind::ANY};
 }
