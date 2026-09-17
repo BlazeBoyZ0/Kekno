@@ -13,6 +13,14 @@ struct Local {
     TypeSpec typeSpec;
 };
 
+struct Upvalue {
+    uint16_t index = 0;
+    bool isLocal = false;
+    std::string name;
+    bool isConst = false;
+    TypeSpec typeSpec;
+};
+
 struct Loop {
     int startIP;
     int scopeDepth;
@@ -32,6 +40,7 @@ struct CompilerContext {
     FunctionPtr function = nullptr;
     FunctionType type = FunctionType::TYPE_SCRIPT;
     std::vector<Local> locals;
+    std::vector<Upvalue> upvalues;
     int scopeDepth = 0;
     Chunk& chunk;
 
@@ -68,6 +77,8 @@ private:
     void endScope();
     void addLocal(const std::string& name, bool isConst = false, TypeSpec typeSpec = TypeSpec{TypeKind::ANY});
     int resolveLocal(CompilerContext* context, const std::string& name);
+    int resolveUpvalue(CompilerContext* context, const std::string& name);
+    int addUpvalue(CompilerContext* context, uint16_t index, bool isLocal, const std::string& name, bool isConst, TypeSpec typeSpec);
 
     uint16_t argumentList();
     TypeSpec parseTypeDeclaration();

@@ -112,7 +112,7 @@ void Compiler::endScope() {
     currentContext->scopeDepth--;
     while (!currentContext->locals.empty() &&
            currentContext->locals.back().depth > currentContext->scopeDepth) {
-        chunk().writeOp(OpCode::OP_POP);
+        chunk().writeOp(OpCode::OP_CLOSE_UPVALUE);
         currentContext->locals.pop_back();
     }
 }
@@ -157,6 +157,49 @@ int Compiler::resolveLocal(CompilerContext* context, const std::string& name) {
     return -1;
 }
 
+int Compiler::resolveUpvalue(CompilerContext* context, const std::string& name) {
+    if (context->enclosing == nullptr) return -1;
+
+    int local = resolveLocal(context->enclosing, name);
+    if (local != -1) {
+        return addUpvalue(context, static_cast<uint16_t>(local), true, name,
+                          context->enclosing->locals[local].isConst,
+                          context->enclosing->locals[local].typeSpec);
+    }
+
+    int upvalue = resolveUpvalue(context->enclosing, name);
+    if (upvalue != -1) {
+        return addUpvalue(context, static_cast<uint16_t>(upvalue), false, name,
+                          context->enclosing->upvalues[upvalue].isConst,
+                          context->enclosing->upvalues[upvalue].typeSpec);
+    }
+
+    return -1;
+}
+
+int Compiler::addUpvalue(CompilerContext* context, uint16_t index, bool isLocal, const std::string& name, bool isConst, TypeSpec typeSpec) {
+    int count = static_cast<int>(context->upvalues.size());
+    for (int i = 0; i < count; i++) {
+        Upvalue* u = &context->upvalues[i];
+        if (u->index == index && u->isLocal == isLocal) {
+            return i;
+        }
+    }
+    if (count >= 65536) {
+        error("Too many closure variables in function.", "Compiler Error");
+        return 0;
+    }
+    Upvalue u;
+    u.index = index;
+    u.isLocal = isLocal;
+    u.name = name;
+    u.isConst = isConst;
+    u.typeSpec = typeSpec;
+    context->upvalues.push_back(u);
+    context->function->upvalueCount = static_cast<int>(context->upvalues.size());
+    return count;
+}
+
 uint16_t Compiler::argumentList() {
     uint16_t argCount = 0;
     if (current.type != TokenType::RPAREN) {
@@ -179,6 +222,7 @@ TypeSpec Compiler::parseTypeDeclaration() {
     else if (current.type == TokenType::TYPE_STRING) { spec.kind = TypeKind::STRING; advance(); }
     else if (current.type == TokenType::TYPE_BOOL) { spec.kind = TypeKind::BOOL; advance(); }
     else if (current.type == TokenType::TYPE_CHAR) { spec.kind = TypeKind::CHAR; advance(); }
+    else if (current.type == TokenType::TYPE_FUNC) { spec.kind = TypeKind::FUNC; advance(); }
     else if (current.type == TokenType::TYPE_ARRAY) {
         spec.kind = TypeKind::ARRAY;
         advance();
@@ -238,9 +282,15 @@ void Compiler::primary() {
             chunk().writeOp(OpCode::OP_GET_LOCAL);
             chunk().write16(static_cast<uint16_t>(localSlot));
         } else {
-            uint16_t nameIdx = addConstant(Value(name));
-            chunk().writeOp(OpCode::OP_GET_GLOBAL);
-            chunk().write16(nameIdx);
+            int upvalueSlot = resolveUpvalue(currentContext, name);
+            if (upvalueSlot != -1) {
+                chunk().writeOp(OpCode::OP_GET_UPVALUE);
+                chunk().write16(static_cast<uint16_t>(upvalueSlot));
+            } else {
+                uint16_t nameIdx = addConstant(Value(name));
+                chunk().writeOp(OpCode::OP_GET_GLOBAL);
+                chunk().write16(nameIdx);
+            }
         }
     } else if (current.type == TokenType::LPAREN) {
         advance();
@@ -294,6 +344,59 @@ void Compiler::postfix() {
             expression();
             consume(TokenType::RBRACKET, "Expected ']' after index");
             chunk().writeOp(OpCode::OP_GET_INDEX);
+        } else if (match(TokenType::PLUS_PLUS) || match(TokenType::MINUS_MINUS)) {
+            OpCode incOp = (prev.type == TokenType::PLUS_PLUS) ? OpCode::OP_INC : OpCode::OP_DEC;
+            std::string opStr = (prev.type == TokenType::PLUS_PLUS) ? "++" : "--";
+
+            if (!chunk().code.empty() && static_cast<OpCode>(chunk().code.back()) == OpCode::OP_GET_INDEX) {
+                chunk().code.pop_back(); // remove OP_GET_INDEX
+                chunk().writeOp(OpCode::OP_DUP_2);
+                chunk().writeOp(OpCode::OP_GET_INDEX);
+                chunk().writeOp(incOp);
+                chunk().writeOp(OpCode::OP_SET_INDEX_POST);
+            } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
+                uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].isConst) {
+                    error("Cannot reassign constant variable '" + currentContext->locals[localSlot].name + "'.", "Compiler Error");
+                }
+                chunk().writeOp(OpCode::OP_GET_LOCAL);
+                chunk().write16(localSlot);
+                chunk().writeOp(OpCode::OP_DUP);
+                chunk().writeOp(incOp);
+                chunk().writeOp(OpCode::OP_SET_LOCAL);
+                chunk().write16(localSlot);
+                chunk().writeOp(OpCode::OP_POP);
+            } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
+                uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
+                    error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
+                }
+                chunk().writeOp(OpCode::OP_GET_UPVALUE);
+                chunk().write16(upvalueSlot);
+                chunk().writeOp(OpCode::OP_DUP);
+                chunk().writeOp(incOp);
+                chunk().writeOp(OpCode::OP_SET_UPVALUE);
+                chunk().write16(upvalueSlot);
+                chunk().writeOp(OpCode::OP_POP);
+            } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
+                uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                std::string varName = chunk().constants[nameIdx].str;
+                if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
+                    error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
+                }
+                chunk().writeOp(OpCode::OP_GET_GLOBAL);
+                chunk().write16(nameIdx);
+                chunk().writeOp(OpCode::OP_DUP);
+                chunk().writeOp(incOp);
+                chunk().writeOp(OpCode::OP_SET_GLOBAL);
+                chunk().write16(nameIdx);
+                chunk().writeOp(OpCode::OP_POP);
+            } else {
+                error("Invalid operand for '" + opStr + "'.", "Compiler Error");
+            }
         } else {
             break;
         }
@@ -302,7 +405,55 @@ void Compiler::postfix() {
 
 void Compiler::unary() {
     if (hasError) return;
-    if (current.type == TokenType::BANG || current.type == TokenType::NOT) {
+    if (current.type == TokenType::PLUS_PLUS || current.type == TokenType::MINUS_MINUS) {
+        OpCode incOp = (current.type == TokenType::PLUS_PLUS) ? OpCode::OP_INC : OpCode::OP_DEC;
+        std::string opStr = (current.type == TokenType::PLUS_PLUS) ? "++" : "--";
+        advance();
+        postfix();
+        if (!chunk().code.empty() && static_cast<OpCode>(chunk().code.back()) == OpCode::OP_GET_INDEX) {
+            chunk().code.pop_back();
+            chunk().writeOp(OpCode::OP_DUP_2);
+            chunk().writeOp(OpCode::OP_GET_INDEX);
+            chunk().writeOp(incOp);
+            chunk().writeOp(OpCode::OP_SET_INDEX);
+        } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
+            uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+            if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].isConst) {
+                error("Cannot reassign constant variable '" + currentContext->locals[localSlot].name + "'.", "Compiler Error");
+            }
+            chunk().writeOp(OpCode::OP_GET_LOCAL);
+            chunk().write16(localSlot);
+            chunk().writeOp(incOp);
+            chunk().writeOp(OpCode::OP_SET_LOCAL);
+            chunk().write16(localSlot);
+        } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
+            uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+            if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
+                error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
+            }
+            chunk().writeOp(OpCode::OP_GET_UPVALUE);
+            chunk().write16(upvalueSlot);
+            chunk().writeOp(incOp);
+            chunk().writeOp(OpCode::OP_SET_UPVALUE);
+            chunk().write16(upvalueSlot);
+        } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
+            uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+            std::string varName = chunk().constants[nameIdx].str;
+            if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
+                error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
+            }
+            chunk().writeOp(OpCode::OP_GET_GLOBAL);
+            chunk().write16(nameIdx);
+            chunk().writeOp(incOp);
+            chunk().writeOp(OpCode::OP_SET_GLOBAL);
+            chunk().write16(nameIdx);
+        } else {
+            error("Invalid operand for '" + opStr + "'.", "Compiler Error");
+        }
+    } else if (current.type == TokenType::BANG || current.type == TokenType::NOT) {
         advance();
         unary();
         chunk().writeOp(OpCode::OP_NOT);
@@ -430,7 +581,7 @@ void Compiler::varDeclaration() {
     if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
         current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
         current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-        current.type == TokenType::TYPE_MAP) {
+        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
         typeSpec = parseTypeDeclaration();
     }
 
@@ -478,6 +629,10 @@ void Compiler::taskDeclaration() {
     std::string fnName = current.text;
     advance();
 
+    if (currentContext->scopeDepth > 0) {
+        addLocal(fnName, false, TypeSpec{TypeKind::ANY});
+    }
+
     FunctionPtr fn = std::make_shared<ObjFunction>();
     fn->name = fnName;
 
@@ -524,7 +679,7 @@ void Compiler::taskDeclaration() {
                 if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
                     current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
                     current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-                    current.type == TokenType::TYPE_MAP) {
+                    current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
                     pSpec = parseTypeDeclaration();
                 }
                 fn->paramTypes.push_back(pSpec);
@@ -555,12 +710,15 @@ void Compiler::taskDeclaration() {
     if (hasError) return;
 
     uint16_t fnConstantIdx = addConstant(Value(fn));
-    chunk().writeOp(OpCode::OP_CONSTANT);
+    chunk().writeOp(OpCode::OP_CLOSURE);
     chunk().write16(fnConstantIdx);
 
-    if (currentContext->scopeDepth > 0) {
-        addLocal(fnName, false, TypeSpec{TypeKind::ANY});
-    } else {
+    for (size_t i = 0; i < fnContext.upvalues.size(); i++) {
+        chunk().writeByte(fnContext.upvalues[i].isLocal ? 1 : 0);
+        chunk().write16(fnContext.upvalues[i].index);
+    }
+
+    if (currentContext->scopeDepth == 0) {
         uint16_t nameIdx = addConstant(Value(fnName));
         chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
         chunk().write16(nameIdx);
@@ -860,6 +1018,29 @@ void Compiler::statement() {
                     chunk().writeOp(OpCode::OP_SET_LOCAL);
                     chunk().write16(localSlot);
                     chunk().writeOp(OpCode::OP_POP);
+                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
+                    uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                    chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+
+                    if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
+                        error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
+                    }
+
+                    if (assignOp != TokenType::EQUAL) {
+                        chunk().writeOp(OpCode::OP_GET_UPVALUE);
+                        chunk().write16(upvalueSlot);
+                        expression();
+                        if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
+                        else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
+                        else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
+                        else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
+                        else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                    } else {
+                        expression();
+                    }
+                    chunk().writeOp(OpCode::OP_SET_UPVALUE);
+                    chunk().write16(upvalueSlot);
+                    chunk().writeOp(OpCode::OP_POP);
                 } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
                     uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
                     chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
@@ -963,14 +1144,38 @@ void Compiler::statement() {
                 chunk().writeOp(OpCode::OP_SET_LOCAL);
                 chunk().write16(localSlot);
                 chunk().writeOp(OpCode::OP_POP);
+            } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
+                uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+
+                if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
+                    error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
+                }
+
+                if (assignOp != TokenType::EQUAL) {
+                    chunk().writeOp(OpCode::OP_GET_UPVALUE);
+                    chunk().write16(upvalueSlot);
+                    expression();
+                    if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
+                    else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
+                    else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
+                    else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
+                    else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                } else {
+                    expression();
+                }
+                consume(TokenType::TILDE, "Every statement must end with '~'");
+                chunk().writeOp(OpCode::OP_SET_UPVALUE);
+                chunk().write16(upvalueSlot);
+                chunk().writeOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
                 uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
                 chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
 
-                    std::string varName = chunk().constants[nameIdx].str;
-                    if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
-                        error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
-                    }
+                std::string varName = chunk().constants[nameIdx].str;
+                if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
+                    error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
+                }
 
                 if (assignOp != TokenType::EQUAL) {
                     chunk().writeOp(OpCode::OP_GET_GLOBAL);
