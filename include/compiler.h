@@ -95,8 +95,8 @@ private:
     void orExpression();
     void expression();
 
-    void varDeclaration();
-    void taskDeclaration();
+    void varDeclaration(bool isPublic = false);
+    void taskDeclaration(bool isPublic = false);
     void giveStatement();
     void blockStatement();
     void ifStatement();

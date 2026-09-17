@@ -10,7 +10,7 @@
 #include <cmath>
 #include "chunk.h"
 
-enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE };
+enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE };
 
 enum class TypeKind {
     ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC
@@ -49,11 +49,27 @@ struct ObjArray;
 struct ObjUpvalue;
 struct ObjFunction;
 struct ObjClosure;
+struct ObjModule;
 
 using UpvaluePtr = std::shared_ptr<ObjUpvalue>;
 using FunctionPtr = std::shared_ptr<ObjFunction>;
 using ClosurePtr = std::shared_ptr<ObjClosure>;
+using ModulePtr = std::shared_ptr<ObjModule>;
 using NativeFn = std::function<Value(int argCount, Value* args)>;
+
+struct SymbolInfo {
+    bool isPublic = false;
+    bool isConst = false;
+    TypeSpec typeSpec;
+};
+
+struct ObjModule {
+    std::string name;
+    std::string path;
+    std::unordered_map<std::string, Value> globals;
+    std::unordered_map<std::string, SymbolInfo> symbols;
+    bool isInitialized = false;
+};
 
 struct ObjArray {
     std::vector<Value> elements;
@@ -90,18 +106,20 @@ struct Value {
     ArrayPtr array;
     MapPtr map;
     NativeFn nativeFn;
+    ModulePtr module;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
     Value(FunctionPtr fn);
     Value(ClosurePtr cl);
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr) {}
-    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr) {}
-    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn) {}
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr) {}
+    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -114,6 +132,7 @@ struct Value {
     bool isArray() const { return type == ValueType::ARRAY; }
     bool isMap() const { return type == ValueType::MAP; }
     bool isNative() const { return type == ValueType::NATIVE; }
+    bool isModule() const { return type == ValueType::MODULE; }
 
     double asFloat() const {
         if (type == ValueType::INT) return static_cast<double>(intVal);
@@ -140,6 +159,7 @@ struct Value {
             case ValueType::FUNCTION: return closure == other.closure;
             case ValueType::ARRAY: return array == other.array;
             case ValueType::MAP: return map == other.map;
+            case ValueType::MODULE: return module == other.module;
             case ValueType::NATIVE: return false;
         }
         return false;
@@ -169,11 +189,13 @@ struct ObjFunction {
     std::string name;
     std::vector<TypeSpec> paramTypes;
     std::vector<TypeSpec> localTypes;
+    ModulePtr module = nullptr;
 };
 
 struct ObjClosure {
     FunctionPtr function;
     std::vector<UpvaluePtr> upvalues;
+    ModulePtr module = nullptr;
 };
 
 struct ObjMap {
@@ -310,6 +332,12 @@ inline std::string Value::toString() const {
     }
     if (isString()) return str;
     if (isNative()) return "<native task>";
+    if (isModule()) {
+        if (module && !module->name.empty()) {
+            return "<module '" + module->name + "'>";
+        }
+        return "<module>";
+    }
     if (isFunction()) {
         if (function && !function->name.empty()) {
             return "<task " + function->name + ">";
