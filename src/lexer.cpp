@@ -235,13 +235,7 @@ Token Lexer::nextToken() {
     }
 
     // Numeric literals & standalone dot handling
-    if (std::isdigit(c) || c == '.') {
-        if (c == '.' && !std::isdigit(peekNext())) {
-            // Standalone '.' or dot followed by non-digit is invalid numeric literal
-            advance();
-            return errorToken("Invalid numeric literal standard '.'", startLine, startCol);
-        }
-
+    if (std::isdigit(c) || (c == '.' && std::isdigit(peekNext()))) {
         size_t start = current;
         int dotCount = 0;
         bool hasDigits = false;
@@ -321,6 +315,9 @@ Token Lexer::nextToken() {
         else if (ident == "halt") t.type = TokenType::HALT;
         else if (ident == "skip") t.type = TokenType::SKIP;
         else if (ident == "grab") t.type = TokenType::GRAB;
+        else if (ident == "as") t.type = TokenType::AS;
+        else if (ident == "pub") t.type = TokenType::PUB;
+        else if (ident == "priv") t.type = TokenType::PRIV;
         else if (ident == "int") t.type = TokenType::TYPE_INT;
         else if (ident == "float") t.type = TokenType::TYPE_FLOAT;
         else if (ident == "string") t.type = TokenType::TYPE_STRING;
@@ -372,6 +369,7 @@ Token Lexer::nextToken() {
         case ']': t.type = TokenType::RBRACKET; break;
         case ',': t.type = TokenType::COMMA; break;
         case ':': t.type = TokenType::COLON; break;
+        case '.': t.type = TokenType::DOT; break;
         case '~': t.type = TokenType::TILDE; break;
         case '=':
             if (match('=')) { t.type = TokenType::EQUAL_EQUAL; t.text = "=="; }

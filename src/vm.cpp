@@ -9,6 +9,9 @@
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 static uint16_t read16(const uint8_t*& ip) {
     uint16_t value = (static_cast<uint16_t>(ip[0]) << 8) | ip[1];
@@ -36,6 +39,10 @@ void VM::resetStack() {
     stack.clear();
     frames.clear();
     openUpvalues = nullptr;
+    moduleCache.clear();
+    loadingStackPaths.clear();
+    loadingStackNames.clear();
+    rootModule = nullptr;
 }
 
 static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val);
@@ -222,8 +229,103 @@ static std::string trimString(const std::string& str) {
     return str.substr(start, end - start);
 }
 
+ModulePtr VM::loadModule(const std::string& modulePathStr, const std::string& requesterPath, ClosurePtr& outClosure, bool& isNew) {
+    outClosure = nullptr;
+    isNew = false;
+
+    std::string relPathStr = modulePathStr;
+    std::replace(relPathStr.begin(), relPathStr.end(), '.', '/');
+    relPathStr += ".kek";
+
+    fs::path targetPath;
+    if (!requesterPath.empty()) {
+        fs::path reqP(requesterPath);
+        targetPath = reqP.parent_path() / fs::path(relPathStr);
+    } else {
+        targetPath = fs::path(relPathStr);
+    }
+
+    std::string canonicalPath;
+    try {
+        if (fs::exists(targetPath)) {
+            canonicalPath = fs::canonical(targetPath).string();
+        } else {
+            canonicalPath = fs::absolute(targetPath).string();
+        }
+    } catch (...) {
+        canonicalPath = fs::absolute(targetPath).string();
+    }
+
+    auto cacheIt = moduleCache.find(canonicalPath);
+    if (cacheIt != moduleCache.end()) {
+        auto pathIt = std::find(loadingStackPaths.begin(), loadingStackPaths.end(), canonicalPath);
+        if (pathIt != loadingStackPaths.end()) {
+            std::string cycleChain = "";
+            for (auto it = pathIt; it != loadingStackPaths.end(); ++it) {
+                size_t idx = std::distance(loadingStackPaths.begin(), it);
+                if (!cycleChain.empty()) cycleChain += " -> ";
+                cycleChain += loadingStackNames[idx];
+            }
+            if (!cycleChain.empty()) cycleChain += " -> ";
+            cycleChain += modulePathStr;
+
+            std::cout << "[Module Error]: Circular module dependency detected: " << cycleChain << std::endl;
+            return nullptr;
+        }
+        isNew = false;
+        return cacheIt->second;
+    }
+
+    std::ifstream file(canonicalPath);
+    if (!file.is_open()) {
+        std::string reqName = requesterPath.empty() ? "main program" : "'" + fs::path(requesterPath).filename().string() + "'";
+        std::cout << "[Module Error]: Could not find module '" << modulePathStr << "' required by " << reqName << std::endl;
+        return nullptr;
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string moduleSource = buffer.str();
+
+    ModulePtr module = std::make_shared<ObjModule>();
+    module->name = modulePathStr;
+    module->path = canonicalPath;
+
+    for (const auto& pair : builtins) {
+        module->globals[pair.first] = pair.second;
+        module->symbols[pair.first] = SymbolInfo{true, false, TypeSpec{TypeKind::ANY}};
+    }
+
+    moduleCache[canonicalPath] = module;
+
+    loadingStackPaths.push_back(canonicalPath);
+    loadingStackNames.push_back(modulePathStr);
+
+    FunctionPtr modFn = std::make_shared<ObjFunction>();
+    modFn->name = modulePathStr;
+    modFn->arity = 0;
+    modFn->module = module;
+
+    Compiler compiler(moduleSource, modFn->chunk);
+    if (!compiler.compile()) {
+        loadingStackPaths.pop_back();
+        loadingStackNames.pop_back();
+        moduleCache.erase(canonicalPath);
+        std::cout << "[Module Error]: Could not compile module '" << modulePathStr << "'." << std::endl;
+        return nullptr;
+    }
+
+    ClosurePtr modClosure = std::make_shared<ObjClosure>();
+    modClosure->function = modFn;
+    modClosure->module = module;
+
+    outClosure = modClosure;
+    isNew = true;
+    return module;
+}
+
 VM::VM() {
-    globals["size"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["size"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: size() expects 1 argument.");
         if (args[0].isArray()) {
             return Value(static_cast<int64_t>(args[0].array ? args[0].array->size() : 0));
@@ -235,7 +337,7 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: size() expects array, map, or string argument.");
     }));
 
-    globals["keys"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["keys"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: keys() expects 1 argument.");
         if (!args[0].isMap() || !args[0].map) {
             throw std::runtime_error("[Runtime Error]: keys() expects map as argument.");
@@ -247,7 +349,7 @@ VM::VM() {
         return Value(arr);
     }));
 
-    globals["values"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["values"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: values() expects 1 argument.");
         if (!args[0].isMap() || !args[0].map) {
             throw std::runtime_error("[Runtime Error]: values() expects map as argument.");
@@ -262,7 +364,7 @@ VM::VM() {
         return Value(arr);
     }));
 
-    globals["has"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["has"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: has() expects 2 arguments.");
         if (args[0].isMap()) {
             if (!args[1].isString()) {
@@ -280,7 +382,7 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: has() expects map or array as first argument.");
     }));
 
-    globals["purge"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["purge"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: purge() expects 2 arguments.");
         if (args[0].isMap()) {
             if (!args[0].map) throw std::runtime_error("[Runtime Error]: purge() expects non-null map as first argument.");
@@ -304,7 +406,7 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: purge() expects map or array as first argument.");
     }));
 
-    globals["inject"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["inject"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: inject() expects 2 arguments.");
         if (!args[0].isArray() || !args[0].array) {
             throw std::runtime_error("[Runtime Error]: inject() expects array as first argument.");
@@ -321,7 +423,7 @@ VM::VM() {
         return Value();
     }));
 
-    globals["expel"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["expel"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: expel() expects 1 argument.");
         if (!args[0].isArray() || !args[0].array) {
             throw std::runtime_error("[Runtime Error]: expel() expects array argument.");
@@ -334,7 +436,7 @@ VM::VM() {
         return last;
     }));
 
-    globals["read"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["read"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: read() expects 1 argument.");
         std::cout << args[0].toString();
         std::cout.flush();
@@ -343,7 +445,7 @@ VM::VM() {
         return Value(input);
     }));
 
-    globals["scan"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["scan"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: scan() expects 1 argument.");
         switch (args[0].type) {
             case ValueType::INT: return Value(std::string("int"));
@@ -355,12 +457,13 @@ VM::VM() {
             case ValueType::MAP: return Value(std::string("map"));
             case ValueType::FUNCTION:
             case ValueType::NATIVE: return Value(std::string("task"));
+            case ValueType::MODULE: return Value(std::string("module"));
             case ValueType::NIL: return Value(std::string("nil"));
         }
         return Value(std::string("nil"));
     }));
 
-    globals["cast_num"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_num"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_num() expects 1 argument.");
         if (args[0].isInt()) return args[0];
         if (args[0].isFloat()) return args[0];
@@ -382,13 +485,13 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: Cannot cast value to number.");
     }));
 
-    globals["cast_str"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_str"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_str() expects 1 argument.");
         return Value(args[0].toString());
     }));
 
     // Explicit Type Casts
-    globals["cast_int"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_int"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_int() expects 1 argument.");
         if (args[0].isInt()) return args[0];
         if (args[0].isFloat()) {
@@ -414,7 +517,7 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: Invalid conversion to int.");
     }));
 
-    globals["cast_float"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_float"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_float() expects 1 argument.");
         if (args[0].isFloat()) return args[0];
         if (args[0].isInt()) return Value(static_cast<double>(args[0].intVal));
@@ -430,12 +533,12 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: Invalid conversion to float.");
     }));
 
-    globals["cast_string"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_string"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_string() expects 1 argument.");
         return Value(args[0].toString());
     }));
 
-    globals["cast_char"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_char"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_char() expects 1 argument.");
         if (args[0].isChar()) return args[0];
         if (args[0].isString()) {
@@ -458,7 +561,7 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: cast_char() requires an actual single-character value.");
     }));
 
-    globals["cast_array"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_array"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_array() expects 1 argument.");
         if (args[0].isArray()) return args[0];
         if (args[0].isString()) {
@@ -471,14 +574,14 @@ VM::VM() {
         throw std::runtime_error("[Runtime Error]: Cannot cast value to array.");
     }));
 
-    globals["cast_map"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["cast_map"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_map() expects 1 argument.");
         if (args[0].isMap()) return args[0];
         throw std::runtime_error("[Runtime Error]: Cannot cast value to map.");
     }));
 
     // String Builtins
-    globals["upper"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["upper"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: upper() expects 1 argument.");
         if (!args[0].isString()) throw std::runtime_error("[Runtime Error]: upper() expects string.");
         std::string s = args[0].str;
@@ -486,7 +589,7 @@ VM::VM() {
         return Value(s);
     }));
 
-    globals["lower"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["lower"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: lower() expects 1 argument.");
         if (!args[0].isString()) throw std::runtime_error("[Runtime Error]: lower() expects string.");
         std::string s = args[0].str;
@@ -494,32 +597,32 @@ VM::VM() {
         return Value(s);
     }));
 
-    globals["trim"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["trim"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: trim() expects 1 argument.");
         if (!args[0].isString()) throw std::runtime_error("[Runtime Error]: trim() expects string.");
         return Value(trimString(args[0].str));
     }));
 
-    globals["contains"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["contains"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: contains() expects 2 arguments.");
         if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: contains() expects string arguments.");
         return Value(args[0].str.find(args[1].str) != std::string::npos);
     }));
 
-    globals["starts_with"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["starts_with"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: starts_with() expects 2 arguments.");
         if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: starts_with() expects string arguments.");
         return Value(args[0].str.rfind(args[1].str, 0) == 0);
     }));
 
-    globals["ends_with"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["ends_with"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: ends_with() expects 2 arguments.");
         if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: ends_with() expects string arguments.");
         if (args[1].str.length() > args[0].str.length()) return Value(false);
         return Value(args[0].str.compare(args[0].str.length() - args[1].str.length(), args[1].str.length(), args[1].str) == 0);
     }));
 
-    globals["split"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["split"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: split() expects 2 arguments.");
         if (!args[0].isString() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: split() expects string arguments.");
         ArrayPtr arr = std::make_shared<ObjArray>();
@@ -540,7 +643,7 @@ VM::VM() {
         return Value(arr);
     }));
 
-    globals["join"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["join"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 2) throw std::runtime_error("[Runtime Error]: join() expects 2 arguments.");
         if (!args[0].isArray() || !args[1].isString()) throw std::runtime_error("[Runtime Error]: join() expects array and string arguments.");
         std::string result = "";
@@ -554,7 +657,7 @@ VM::VM() {
         return Value(result);
     }));
 
-    globals["replace"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["replace"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 3) throw std::runtime_error("[Runtime Error]: replace() expects 3 arguments.");
         if (!args[0].isString() || !args[1].isString() || !args[2].isString()) {
             throw std::runtime_error("[Runtime Error]: replace() expects string arguments.");
@@ -572,7 +675,7 @@ VM::VM() {
     }));
 
     // Math Functions
-    globals["clock"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["clock"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         (void)args;
         if (argCount != 0) throw std::runtime_error("[Runtime Error]: clock() expects 0 arguments.");
         auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
@@ -580,7 +683,7 @@ VM::VM() {
         return Value(seconds);
     }));
 
-    globals["rand"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["rand"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         (void)args;
         if (argCount != 0) throw std::runtime_error("[Runtime Error]: rand() expects 0 arguments.");
         static std::mt19937 rng(std::random_device{}());
@@ -588,28 +691,28 @@ VM::VM() {
         return Value(dist(rng));
     }));
 
-    globals["abs"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["abs"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: abs() expects 1 argument.");
         if (args[0].isInt()) return Value(std::abs(args[0].intVal));
         if (args[0].isFloat()) return Value(std::abs(args[0].floatVal));
         throw std::runtime_error("[Runtime Error]: abs() expects a number.");
     }));
 
-    globals["floor"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["floor"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: floor() expects 1 argument.");
         if (args[0].isInt()) return args[0];
         if (args[0].isFloat()) return Value(std::floor(args[0].floatVal));
         throw std::runtime_error("[Runtime Error]: floor() expects a number.");
     }));
 
-    globals["ceil"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["ceil"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: ceil() expects 1 argument.");
         if (args[0].isInt()) return args[0];
         if (args[0].isFloat()) return Value(std::ceil(args[0].floatVal));
         throw std::runtime_error("[Runtime Error]: ceil() expects a number.");
     }));
 
-    globals["sqrt"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["sqrt"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 1) throw std::runtime_error("[Runtime Error]: sqrt() expects 1 argument.");
         if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: sqrt() expects a number.");
         double val = args[0].asFloat();
@@ -617,7 +720,7 @@ VM::VM() {
         return Value(std::sqrt(val));
     }));
 
-    globals["clamp"] = Value(NativeFn([](int argCount, Value* args) -> Value {
+    builtins["clamp"] = Value(NativeFn([](int argCount, Value* args) -> Value {
         if (argCount != 3) throw std::runtime_error("[Runtime Error]: clamp() expects 3 arguments.");
         if (!args[0].isNumber() || !args[1].isNumber() || !args[2].isNumber()) {
             throw std::runtime_error("[Runtime Error]: clamp() expects numbers.");
@@ -638,30 +741,44 @@ VM::VM() {
     }));
 }
 
-void VM::run(Chunk& mainChunk) {
+void VM::run(Chunk& mainChunk, const std::string& scriptPath) {
     resetStack();
-    grabSnapshots.clear();
 
-    struct VMRunGuard {
-        VM* vm;
-        VMRunGuard(VM* v) : vm(v) {}
-        ~VMRunGuard() {
-            if (!vm->grabSnapshots.empty()) {
-                vm->globals = vm->grabSnapshots.front();
-                vm->grabSnapshots.clear();
-            }
-            vm->resetStack();
+    rootModule = std::make_shared<ObjModule>();
+    rootModule->name = scriptPath.empty() ? "main" : scriptPath;
+    try {
+        if (!scriptPath.empty() && fs::exists(scriptPath)) {
+            rootModule->path = fs::canonical(scriptPath).string();
+        } else if (!scriptPath.empty()) {
+            rootModule->path = fs::absolute(scriptPath).string();
+        } else {
+            rootModule->path = fs::current_path().string() + "/main.kek";
         }
-    } runGuard(this);
+    } catch (...) {
+        rootModule->path = scriptPath;
+    }
+
+    for (const auto& pair : builtins) {
+        rootModule->globals[pair.first] = pair.second;
+        rootModule->symbols[pair.first] = SymbolInfo{true, false, TypeSpec{TypeKind::ANY}};
+    }
+
+    if (!rootModule->path.empty()) {
+        moduleCache[rootModule->path] = rootModule;
+        loadingStackPaths.push_back(rootModule->path);
+        loadingStackNames.push_back(rootModule->name);
+    }
 
     FunctionPtr mainFn = std::make_shared<ObjFunction>();
     mainFn->chunk = mainChunk;
     mainFn->localTypes = mainChunk.localTypes;
     mainFn->name = "main";
     mainFn->arity = 0;
+    mainFn->module = rootModule;
 
     ClosurePtr mainClosure = std::make_shared<ObjClosure>();
     mainClosure->function = mainFn;
+    mainClosure->module = rootModule;
 
     push(Value(mainClosure));
     call(mainClosure, 0);
@@ -690,14 +807,25 @@ void VM::run(Chunk& mainChunk) {
             }
             case OpCode::OP_DEFINE_GLOBAL: {
                 uint16_t index = read16(frame->ip);
+                uint8_t flags = *frame->ip++;
+                bool isPublic = (flags & 1) != 0;
+                bool isConst = (flags & 2) != 0;
                 std::string name = frame->closure->function->chunk.constants[index].str;
-                globals[name] = pop();
-                globalTypes[name] = TypeSpec{TypeKind::ANY};
+                Value val = pop();
+                if (val.isFunction()) {
+                    if (val.closure) val.closure->module = frame->closure->module;
+                    if (val.function) val.function->module = frame->closure->module;
+                }
+                frame->closure->module->globals[name] = val;
+                frame->closure->module->symbols[name] = SymbolInfo{isPublic, isConst, TypeSpec{TypeKind::ANY}};
                 break;
             }
             case OpCode::OP_DEFINE_GLOBAL_TYPED: {
                 uint16_t index = read16(frame->ip);
                 uint16_t typeSpecIdx = read16(frame->ip);
+                uint8_t flags = *frame->ip++;
+                bool isPublic = (flags & 1) != 0;
+                bool isConst = (flags & 2) != 0;
                 TypeSpec expected = parseTypeSpecString(frame->closure->function->chunk.constants[typeSpecIdx].str);
                 std::string name = frame->closure->function->chunk.constants[index].str;
                 Value val = pop();
@@ -707,8 +835,12 @@ void VM::run(Chunk& mainChunk) {
                               << val.getTypeSpec().toString() << "." << std::endl;
                     return;
                 }
-                globals[name] = val;
-                globalTypes[name] = expected;
+                if (val.isFunction()) {
+                    if (val.closure) val.closure->module = frame->closure->module;
+                    if (val.function) val.function->module = frame->closure->module;
+                }
+                frame->closure->module->globals[name] = val;
+                frame->closure->module->symbols[name] = SymbolInfo{isPublic, isConst, expected};
                 break;
             }
             case OpCode::OP_CHECK_LOCAL_TYPE: {
@@ -727,8 +859,9 @@ void VM::run(Chunk& mainChunk) {
             case OpCode::OP_GET_GLOBAL: {
                 uint16_t index = read16(frame->ip);
                 std::string name = frame->closure->function->chunk.constants[index].str;
-                auto it = globals.find(name);
-                if (it == globals.end()) {
+                ModulePtr mod = frame->closure->module;
+                auto it = mod->globals.find(name);
+                if (it == mod->globals.end()) {
                     std::cout << "[Runtime Error]: Undefined variable '" << name << "'" << std::endl;
                     return;
                 }
@@ -738,14 +871,23 @@ void VM::run(Chunk& mainChunk) {
             case OpCode::OP_SET_GLOBAL: {
                 uint16_t index = read16(frame->ip);
                 std::string name = frame->closure->function->chunk.constants[index].str;
-                auto it = globals.find(name);
-                if (it == globals.end()) {
+                ModulePtr mod = frame->closure->module;
+                auto it = mod->globals.find(name);
+                if (it == mod->globals.end()) {
                     std::cout << "[Runtime Error]: Variable '" << name << "' is not defined." << std::endl;
                     return;
                 }
-                auto typeIt = globalTypes.find(name);
-                if (typeIt != globalTypes.end() && typeIt->second.kind != TypeKind::ANY && typeIt->second.kind != TypeKind::UNTYPED) {
-                    TypeSpec expected = typeIt->second;
+                auto symIt = mod->symbols.find(name);
+                if (symIt != mod->symbols.end() && symIt->second.isConst) {
+                    if (it->second.isModule()) {
+                        std::cout << "[Runtime Error]: Cannot reassign module alias '" << name << "'." << std::endl;
+                    } else {
+                        std::cout << "[Runtime Error]: Cannot reassign constant variable '" << name << "'." << std::endl;
+                    }
+                    return;
+                }
+                if (symIt != mod->symbols.end() && symIt->second.typeSpec.kind != TypeKind::ANY && symIt->second.typeSpec.kind != TypeKind::UNTYPED) {
+                    TypeSpec expected = symIt->second.typeSpec;
                     Value val = peek(0);
                     if (!checkAndCoerceValueType(expected, val)) {
                         std::cout << "[Runtime Error]: Type mismatch for variable '" << name
@@ -808,6 +950,8 @@ void VM::run(Chunk& mainChunk) {
                 FunctionPtr fn = frame->closure->function->chunk.constants[constantIdx].function;
                 ClosurePtr closure = std::make_shared<ObjClosure>();
                 closure->function = fn;
+                closure->module = frame->closure->module;
+                fn->module = frame->closure->module;
                 for (int i = 0; i < fn->upvalueCount; i++) {
                     uint8_t isLocal = *frame->ip++;
                     uint16_t index = read16(frame->ip);
@@ -883,6 +1027,111 @@ void VM::run(Chunk& mainChunk) {
                     std::cout << "[Runtime Error]: Can only call task values (got type " << callee.getTypeSpec().toString() << ")." << std::endl;
                     return;
                 }
+                break;
+            }
+            case OpCode::OP_GET_MEMBER: {
+                uint16_t nameIdx = read16(frame->ip);
+                std::string memberName = frame->closure->function->chunk.constants[nameIdx].str;
+                Value target = pop();
+
+                if (!target.isModule() || !target.module) {
+                    std::cout << "[Member Error]: Cannot access member '" << memberName << "' on non-module value." << std::endl;
+                    return;
+                }
+
+                ModulePtr mod = target.module;
+                auto symIt = mod->symbols.find(memberName);
+                if (symIt == mod->symbols.end()) {
+                    std::cout << "[Member Error]: Member '" << memberName << "' does not exist in module '" << mod->name << "'." << std::endl;
+                    return;
+                }
+
+                if (!symIt->second.isPublic && frame->closure->module != mod) {
+                    std::cout << "[Module Error]: '" << memberName << "' is private in module '" << mod->name << "'." << std::endl;
+                    return;
+                }
+
+                push(mod->globals[memberName]);
+                break;
+            }
+            case OpCode::OP_SET_MEMBER: {
+                uint16_t nameIdx = read16(frame->ip);
+                std::string memberName = frame->closure->function->chunk.constants[nameIdx].str;
+                Value val = pop();
+                Value target = pop();
+
+                if (!target.isModule() || !target.module) {
+                    std::cout << "[Member Error]: Cannot set member '" << memberName << "' on non-module value." << std::endl;
+                    return;
+                }
+
+                ModulePtr mod = target.module;
+                auto symIt = mod->symbols.find(memberName);
+                if (symIt == mod->symbols.end()) {
+                    std::cout << "[Member Error]: Member '" << memberName << "' does not exist in module '" << mod->name << "'." << std::endl;
+                    return;
+                }
+
+                if (!symIt->second.isPublic && frame->closure->module != mod) {
+                    std::cout << "[Module Error]: '" << memberName << "' is private in module '" << mod->name << "'." << std::endl;
+                    return;
+                }
+
+                if (symIt->second.isConst) {
+                    std::cout << "[Runtime Error]: Cannot reassign constant variable '" << memberName << "'." << std::endl;
+                    return;
+                }
+
+                if (symIt->second.typeSpec.kind != TypeKind::ANY && symIt->second.typeSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(symIt->second.typeSpec, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for member '" << memberName << "'." << std::endl;
+                        return;
+                    }
+                }
+
+                mod->globals[memberName] = val;
+                push(val);
+                break;
+            }
+            case OpCode::OP_SET_MEMBER_POST: {
+                uint16_t nameIdx = read16(frame->ip);
+                std::string memberName = frame->closure->function->chunk.constants[nameIdx].str;
+                Value val = pop();
+                Value target = pop();
+
+                if (!target.isModule() || !target.module) {
+                    std::cout << "[Member Error]: Cannot set member '" << memberName << "' on non-module value." << std::endl;
+                    return;
+                }
+
+                ModulePtr mod = target.module;
+                auto symIt = mod->symbols.find(memberName);
+                if (symIt == mod->symbols.end()) {
+                    std::cout << "[Member Error]: Member '" << memberName << "' does not exist in module '" << mod->name << "'." << std::endl;
+                    return;
+                }
+
+                if (!symIt->second.isPublic && frame->closure->module != mod) {
+                    std::cout << "[Module Error]: '" << memberName << "' is private in module '" << mod->name << "'." << std::endl;
+                    return;
+                }
+
+                if (symIt->second.isConst) {
+                    std::cout << "[Runtime Error]: Cannot reassign constant variable '" << memberName << "'." << std::endl;
+                    return;
+                }
+
+                Value oldVal = mod->globals[memberName];
+
+                if (symIt->second.typeSpec.kind != TypeKind::ANY && symIt->second.typeSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(symIt->second.typeSpec, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for member '" << memberName << "'." << std::endl;
+                        return;
+                    }
+                }
+
+                mod->globals[memberName] = val;
+                push(oldVal);
                 break;
             }
             case OpCode::OP_SET_INDEX_POST: {
@@ -1068,36 +1317,77 @@ void VM::run(Chunk& mainChunk) {
                 break;
             }
             case OpCode::OP_GRAB: {
-                Value pathVal = pop();
-                if (!pathVal.isString()) {
-                    std::cout << "[Runtime Error]: grab path must be a string." << std::endl;
-                    return;
-                }
-                std::ifstream file(pathVal.str);
-                if (!file.is_open()) {
-                    std::cout << "[Runtime Error]: Could not open grab file \"" << pathVal.str << "\"." << std::endl;
-                    return;
-                }
-                std::stringstream buffer;
-                buffer << file.rdbuf();
-                std::string grabSource = buffer.str();
+                uint16_t pathIdx = read16(frame->ip);
+                uint16_t aliasIdx = read16(frame->ip);
+                std::string subModPath = frame->closure->function->chunk.constants[pathIdx].str;
+                std::string subAlias = frame->closure->function->chunk.constants[aliasIdx].str;
 
-                FunctionPtr grabFn = std::make_shared<ObjFunction>();
-                grabFn->name = pathVal.str;
-                grabFn->arity = 0;
-                Compiler compiler(grabSource, grabFn->chunk);
-                if (!compiler.compile()) {
-                    std::cout << "[Runtime Error]: Could not compile grab file \"" << pathVal.str << "\"." << std::endl;
+                ClosurePtr subClosure = nullptr;
+                bool isNew = false;
+                ModulePtr grabbedMod = loadModule(subModPath, frame->closure->module->path, subClosure, isNew);
+                if (!grabbedMod) {
                     return;
                 }
-                ClosurePtr grabClosure = std::make_shared<ObjClosure>();
-                grabClosure->function = grabFn;
-                grabSnapshots.push_back(globals);
-                push(Value(grabClosure));
-                if (!call(grabClosure, 0, true)) {
-                    return;
+
+                if (!subAlias.empty()) {
+                    auto existingSymIt = frame->closure->module->symbols.find(subAlias);
+                    if (existingSymIt != frame->closure->module->symbols.end() && existingSymIt->second.isConst) {
+                        std::cout << "[Runtime Error]: Cannot reassign module alias '" << subAlias << "'." << std::endl;
+                        return;
+                    }
+
+                    frame->closure->module->globals[subAlias] = Value(grabbedMod);
+                    frame->closure->module->symbols[subAlias] = SymbolInfo{false, true, TypeSpec{TypeKind::ANY}};
+                } else {
+                    std::vector<std::string> parts;
+                    std::string token;
+                    std::stringstream ss(subModPath);
+                    while (std::getline(ss, token, '.')) {
+                        parts.push_back(token);
+                    }
+
+                    if (parts.size() == 1) {
+                        std::string name = parts[0];
+                        frame->closure->module->globals[name] = Value(grabbedMod);
+                        frame->closure->module->symbols[name] = SymbolInfo{false, true, TypeSpec{TypeKind::ANY}};
+                    } else if (!parts.empty()) {
+                        std::string rootName = parts[0];
+                        ModulePtr parentMod = nullptr;
+                        auto rootIt = frame->closure->module->globals.find(rootName);
+                        if (rootIt != frame->closure->module->globals.end() && rootIt->second.isModule() && rootIt->second.module) {
+                            parentMod = rootIt->second.module;
+                        } else {
+                            parentMod = std::make_shared<ObjModule>();
+                            parentMod->name = rootName;
+                            frame->closure->module->globals[rootName] = Value(parentMod);
+                            frame->closure->module->symbols[rootName] = SymbolInfo{false, true, TypeSpec{TypeKind::ANY}};
+                        }
+
+                        for (size_t i = 1; i < parts.size() - 1; ++i) {
+                            std::string partName = parts[i];
+                            auto pIt = parentMod->globals.find(partName);
+                            if (pIt != parentMod->globals.end() && pIt->second.isModule() && pIt->second.module) {
+                                parentMod = pIt->second.module;
+                            } else {
+                                ModulePtr nextMod = std::make_shared<ObjModule>();
+                                nextMod->name = partName;
+                                parentMod->globals[partName] = Value(nextMod);
+                                parentMod->symbols[partName] = SymbolInfo{true, false, TypeSpec{TypeKind::ANY}};
+                                parentMod = nextMod;
+                            }
+                        }
+
+                        std::string lastName = parts.back();
+                        parentMod->globals[lastName] = Value(grabbedMod);
+                        parentMod->symbols[lastName] = SymbolInfo{true, false, TypeSpec{TypeKind::ANY}};
+                    }
                 }
-                frame = &frames.back();
+
+                if (isNew && subClosure) {
+                    push(Value(subClosure));
+                    call(subClosure, 0, true);
+                    frame = &frames.back();
+                }
                 break;
             }
             case OpCode::OP_EQUAL: {
@@ -1337,16 +1627,27 @@ void VM::run(Chunk& mainChunk) {
                 closeUpvalues(frame->slotsOffset);
                 size_t slotsOffset = frame->slotsOffset;
                 bool wasGrab = frame->isGrab;
+                ModulePtr frameMod = frame->closure->module;
                 frames.pop_back();
-                if (wasGrab && !grabSnapshots.empty()) {
-                    grabSnapshots.pop_back();
-                }
                 if (frames.empty()) {
                     pop(); // pop main function
+                    if (!loadingStackPaths.empty()) {
+                        loadingStackPaths.pop_back();
+                        loadingStackNames.pop_back();
+                    }
+                    if (frameMod) frameMod->isInitialized = true;
                     return;
                 }
                 stack.resize(slotsOffset);
-                push(result);
+                if (wasGrab) {
+                    if (!loadingStackPaths.empty()) {
+                        loadingStackPaths.pop_back();
+                        loadingStackNames.pop_back();
+                    }
+                    if (frameMod) frameMod->isInitialized = true;
+                } else {
+                    push(result);
+                }
                 frame = &frames.back();
                 break;
             }

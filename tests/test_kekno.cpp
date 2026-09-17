@@ -3,8 +3,11 @@
 #include <fstream>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include "compiler.h"
 #include "vm.h"
+
+namespace fs = std::filesystem;
 
 static int g_testsPassed = 0;
 static int g_testsFailed = 0;
@@ -19,7 +22,7 @@ static int g_testsFailed = 0;
         } \
     } while (0)
 
-static std::string runCode(VM& vm, const std::string& code, bool& compileSuccess) {
+static std::string runCode(VM& vm, const std::string& code, bool& compileSuccess, const std::string& scriptPath = "") {
     std::stringstream buffer;
     std::streambuf* oldCout = std::cout.rdbuf(buffer.rdbuf());
 
@@ -27,16 +30,16 @@ static std::string runCode(VM& vm, const std::string& code, bool& compileSuccess
     Compiler compiler(code, chunk);
     compileSuccess = compiler.compile();
     if (compileSuccess) {
-        vm.run(chunk);
+        vm.run(chunk, scriptPath);
     }
 
     std::cout.rdbuf(oldCout);
     return buffer.str();
 }
 
-static std::string runCodeFresh(const std::string& code, bool& compileSuccess) {
+static std::string runCodeFresh(const std::string& code, bool& compileSuccess, const std::string& scriptPath = "") {
     VM vm;
-    return runCode(vm, code, compileSuccess);
+    return runCode(vm, code, compileSuccess, scriptPath);
 }
 
 static void testNativeFunctionsAndMath() {
@@ -287,19 +290,19 @@ static void testGrabAndVMState() {
     bool ok = false;
     std::string out;
 
-    // Missing file
-    out = runCodeFresh("grab \"non_existent_file_12345.kek\" ~", ok);
-    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Could not open grab file") != std::string::npos, "grab missing file");
+    // Missing module error
+    out = runCodeFresh("grab non_existent_mod_12345 ~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("Could not find module 'non_existent_mod_12345'") != std::string::npos, "grab missing module diagnostic");
 
-    // Valid grab file
+    // Valid grab module
     {
         std::ofstream validFile("temp_valid.kek");
-        validFile << "task addTwo(a, b) { give a + b ~ } let exportedVal = 42 ~";
+        validFile << "pub task addTwo(a, b) { give a + b ~ } pub let exportedVal = 42 ~";
         validFile.close();
     }
     VM vm;
-    out = runCode(vm, "grab \"temp_valid.kek\" ~ echo addTwo(10, 20) ~ echo exportedVal ~", ok);
-    TEST_ASSERT(ok && out.find("=> 30") != std::string::npos && out.find("=> 42") != std::string::npos, "valid grab file import");
+    out = runCode(vm, "grab temp_valid ~ echo temp_valid.addTwo(10, 20) ~ echo temp_valid.exportedVal ~", ok);
+    TEST_ASSERT(ok && out.find("=> 30") != std::string::npos && out.find("=> 42") != std::string::npos, "valid grab module import");
     std::remove("temp_valid.kek");
 }
 
@@ -559,8 +562,142 @@ static void testV050Features() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "integer overflow ++ runtime error");
 }
 
+static void testV052Modules() {
+    bool ok = false;
+    std::string out;
+
+    // Create temporary module test directory structure
+    fs::create_directories("test_mods/lib");
+
+    // 1. math.kek
+    {
+        std::ofstream f("test_mods/math.kek");
+        f << "echo \"math init\"~\n"
+          << "pub let pi = 3.14~\n"
+          << "pub const int MAX = 100~\n"
+          << "priv let secret = 42~\n"
+          << "pub task sqrt(x) { give x~\n }\n"
+          << "priv task helper() { give secret~\n }\n"
+          << "let counter = 0~\n"
+          << "pub task incState() { counter++~ give counter~\n }\n"
+          << "pub task getState() { give counter~\n }\n";
+        f.close();
+    }
+
+    // 2. lib/num.kek
+    {
+        std::ofstream f("test_mods/lib/num.kek");
+        f << "grab helper as h~\n"
+          << "pub task five() { give 5~\n }\n"
+          << "pub task getValue() { give h.val~\n }\n";
+        f.close();
+    }
+
+    // 3. lib/helper.kek
+    {
+        std::ofstream f("test_mods/lib/helper.kek");
+        f << "pub let val = 42~\n";
+        f.close();
+    }
+
+    // 4. circ_a.kek and circ_b.kek
+    {
+        std::ofstream f1("test_mods/circ_a.kek");
+        f1 << "grab circ_b~\n";
+        f1.close();
+        std::ofstream f2("test_mods/circ_b.kek");
+        f2 << "grab circ_a~\n";
+        f2.close();
+    }
+
+    // 5. mod_data.kek
+    {
+        std::ofstream f("test_mods/mod_data.kek");
+        f << "pub let arr = [1, 2, 3]~\n"
+          << "pub let m = {\"a\": 10}~\n"
+          << "pub const int LIMIT = 50~\n";
+        f.close();
+    }
+
+    // Test simple loading, member access, aliases, and single initialization caching
+    std::string mainCode1 =
+        "grab math~\n"
+        "grab math as m~\n"
+        "echo math.pi~\n"
+        "echo m.MAX~\n"
+        "echo math.sqrt(9)~\n"
+        "math.incState()~\n"
+        "echo m.getState()~\n";
+
+    out = runCodeFresh(mainCode1, ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("math init") != std::string::npos, "module top-level init executed");
+    size_t pos1 = out.find("math init");
+    size_t pos2 = (pos1 != std::string::npos) ? out.find("math init", pos1 + 1) : std::string::npos;
+    TEST_ASSERT(pos1 != std::string::npos && pos2 == std::string::npos, "module initialized exactly once");
+    TEST_ASSERT(out.find("=> 3.14") != std::string::npos, "pub let member access");
+    TEST_ASSERT(out.find("=> 100") != std::string::npos, "pub const member access via alias");
+    TEST_ASSERT(out.find("=> 9") != std::string::npos, "pub task call member access");
+    TEST_ASSERT(out.find("=> 1") != std::string::npos, "aliased module shares state");
+
+    // Test private variable access rejection
+    out = runCodeFresh("grab math~\n echo math.secret~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("secret' is private in module 'math'") != std::string::npos, "private variable access rejected");
+
+    // Test private task access rejection
+    out = runCodeFresh("grab math~\n math.helper()~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("helper' is private in module 'math'") != std::string::npos, "private task access rejected");
+
+    // Test nonexistent member error
+    out = runCodeFresh("grab math~\n echo math.unknown~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("[Member Error]") != std::string::npos && out.find("Member 'unknown' does not exist") != std::string::npos, "nonexistent member error");
+
+    // Test relative module loading (from lib/num.kek grabbing helper.kek)
+    out = runCodeFresh("grab lib.num as n~\n echo n.five()~\n echo n.getValue()~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("=> 5") != std::string::npos && out.find("=> 42") != std::string::npos, "relative module dependency resolution");
+
+    // Test nested path import without alias (grab lib.num~)
+    out = runCodeFresh("grab lib.num~\n echo lib.num.five()~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("=> 5") != std::string::npos, "nested path import without alias allows lib.num.five()");
+
+    // Test circular dependency detection
+    out = runCodeFresh("grab circ_a~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("Circular module dependency detected") != std::string::npos && out.find("circ_a -> circ_b -> circ_a") != std::string::npos, "circular dependency detection");
+
+    // Test module alias immutability
+    out = runCodeFresh("grab math as m~\n m = 123~\n", ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Cannot reassign module alias 'm'") != std::string::npos, "module alias immutability");
+
+    // Test 'pub'/'priv' forbidden on local variables, task parameters, local tasks
+    out = runCodeFresh("task foo() { pub let x = 10~ }\n", ok);
+    TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos, "pub on local variable rejected at compile time");
+
+    out = runCodeFresh("task foo(pub int x) {}\n", ok);
+    TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos, "pub on parameter rejected at compile time");
+
+    // Test 'grab' forbidden inside tasks, blocks, loops, conditionals
+    out = runCodeFresh("task foo() { grab math~ }\n", ok);
+    TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos && out.find("'grab' is allowed only at top-level module scope") != std::string::npos, "grab inside task rejected");
+
+    out = runCodeFresh("if (true) { grab math~ }\n", ok);
+    TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos, "grab inside block/conditional rejected");
+
+    // Test public mutable arrays/maps mutation and pub const enforcement
+    std::string dataCode =
+        "grab mod_data as d~\n"
+        "d.arr[0] = 99~\n"
+        "echo d.arr[0]~\n"
+        "d.m[\"a\"] = 100~\n"
+        "echo d.m[\"a\"]~\n"
+        "d.LIMIT = 200~\n";
+    out = runCodeFresh(dataCode, ok, "test_mods/main.kek");
+    TEST_ASSERT(ok && out.find("=> 99") != std::string::npos && out.find("=> 100") != std::string::npos && out.find("Cannot reassign constant variable 'LIMIT'") != std::string::npos, "public mutable collections and pub const enforcement");
+
+    // Clean up temporary test files
+    fs::remove_all("test_mods");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.5.0 Regression Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.5.2 Regression Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -578,6 +715,7 @@ int main() {
     testGrabAndVMState();
     testV046Patches();
     testV050Features();
+    testV052Modules();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

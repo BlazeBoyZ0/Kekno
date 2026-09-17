@@ -21,7 +21,7 @@ static void runFile(const std::string& path) {
     Compiler compiler(source, bytecode);
 
     if (compiler.compile()) {
-        vm.run(bytecode);
+        vm.run(bytecode, path);
     }
 }
 
