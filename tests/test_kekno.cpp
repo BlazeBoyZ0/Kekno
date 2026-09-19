@@ -126,7 +126,7 @@ static void testArrayMethods() {
 
     // remove() mutually exclusive ind and val
     out = runCodeFresh("let nums = [10, 20, 30] ~ echo nums.remove(ind=1) ~ echo nums.remove(val=30) ~ echo nums ~", ok);
-    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos && out.find("=> true") != std::string::npos && out.find("[10]") != std::string::npos, "array remove ind & val modes");
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos && out.find("=> 30") != std::string::npos && out.find("[10]") != std::string::npos, "array remove ind & val modes");
 
     out = runCodeFresh("let nums = [10] ~ nums.remove(ind=0, val=10) ~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "array remove both ind and val error");
@@ -886,8 +886,92 @@ void testV056RegressionSuite() {
     TEST_ASSERT(ok && out.find("=> 15") != std::string::npos && out.find("H") != std::string::npos && out.find("HELLO 👋 WORLD 🌍") != std::string::npos && out.find("hello 👋 world 🌍") != std::string::npos, "unicode string operations without corruption");
 }
 
+static void testV058NewFeaturesAndIntegrations() {
+    bool ok = false;
+    std::string out;
+
+    // 1. typeof() on all supported value types & nil
+    out = runCodeFresh("echo typeof(10) ~ echo typeof(3.14) ~ echo typeof('c') ~ echo typeof(\"str\") ~ echo typeof(true) ~ echo typeof([]) ~ echo typeof({}) ~ echo typeof(task(){}) ~ echo typeof(nil) ~", ok);
+    TEST_ASSERT(ok && out.find("int") != std::string::npos && out.find("float") != std::string::npos && out.find("char") != std::string::npos &&
+                out.find("string") != std::string::npos && out.find("bool") != std::string::npos && out.find("array") != std::string::npos &&
+                out.find("map") != std::string::npos && out.find("func") != std::string::npos && out.find("nil") != std::string::npos, "typeof on all types");
+
+    // typeof on let variables, function results, callbacks
+    out = runCodeFresh("let x = nil ~ echo typeof(x) ~ x = 42 ~ echo typeof(x) ~ task getArr() { give [1] ~ } echo typeof(getArr()) ~", ok);
+    TEST_ASSERT(ok && out.find("=> nil") != std::string::npos && out.find("=> int") != std::string::npos && out.find("=> array") != std::string::npos, "typeof dynamic let and returns");
+
+    // 2. nil comparisons and flow
+    out = runCodeFresh("echo (nil == nil) ~ echo (10 == nil) ~ echo (nil != \"a\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos && out.find("=> false") != std::string::npos && out.find("=> true") != std::string::npos, "nil comparisons");
+
+    out = runCodeFresh("let arr = [1, nil, 3] ~ echo arr.contains(nil) ~ echo arr.index_of(nil) ~", ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos && out.find("=> 1") != std::string::npos, "nil inside arrays contains and index_of");
+
+    out = runCodeFresh("let m = {\"a\": nil} ~ echo m.contains(\"a\") ~ echo m.get(\"a\") ~ echo m.get(\"b\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos && out.find("=> nil") != std::string::npos, "nil values in map");
+
+    out = runCodeFresh("let arr = [1, nil, 2] ~ echo arr.map(task(x) { give x ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("[1, nil, 2]") != std::string::npos, "nil through array map()");
+
+    // 3. Deeply nested expressions
+    std::string deepExpr = "1";
+    for (int i = 0; i < 350; i++) deepExpr = "(" + deepExpr + " + 1)";
+    deepExpr = "let x = " + deepExpr + " ~";
+    out = runCodeFresh(deepExpr, ok);
+    TEST_ASSERT(!ok && out.find("Expression nesting limit exceeded") != std::string::npos, "compiler deeply nested expression limit");
+
+    // 4. Recursive collections cycle-safe stringification
+    out = runCodeFresh("let a = [] ~ a.push(a) ~ echo a ~", ok);
+    TEST_ASSERT(ok && out.find("[[...]]") != std::string::npos, "cycle-safe recursive array echo");
+
+    out = runCodeFresh("let m = {} ~ m[\"self\"] = m ~ echo m ~", ok);
+    TEST_ASSERT(ok && out.find("{\"self\": {...}}") != std::string::npos, "cycle-safe recursive map echo");
+
+    // 5. Array remove(val=...) return value
+    out = runCodeFresh("let a = [10, 20, 30] ~ echo a.remove(val=20) ~ echo a.remove(val=99) ~", ok);
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos && out.find("=> nil") != std::string::npos, "array remove val returns value or nil");
+
+    // 6. Dynamic -> typed collection assignment
+    out = runCodeFresh("let a = [1, 2] ~ let array<float> b = a ~ b.push(3.5) ~ echo a ~ echo b ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2]") != std::string::npos && out.find("[1.0, 2.0, 3.5]") != std::string::npos, "dynamic to typed array assignment does not mutate original type or contents");
+
+    out = runCodeFresh("let m1 = {\"a\": 1} ~ let map<string, float> m2 = m1 ~ m2[\"b\"] = 2.5 ~ echo m1 ~ echo m2 ~", ok);
+    TEST_ASSERT(ok && out.find("{\"a\": 1}") != std::string::npos && out.find("{\"a\": 1.0, \"b\": 2.5}") != std::string::npos, "dynamic to typed map assignment does not mutate original type or contents");
+
+    // 7. Failed module initialization and rollback
+    fs::create_directories("test_v58_mods");
+    {
+        std::ofstream f("test_v58_mods/bad_init.kek");
+        f << "let x = 10 / 0 ~\n";
+        f.close();
+    }
+    VM vm;
+    out = runCode(vm, "grab bad_init ~\n", ok, "test_v58_mods/main.kek");
+    TEST_ASSERT(ok && out.find("Division by zero") != std::string::npos, "failed module init reports runtime error");
+
+    out = runCode(vm, "grab bad_init ~\n", ok, "test_v58_mods/main.kek");
+    TEST_ASSERT(ok && out.find("Division by zero") != std::string::npos, "rolled back module re-attempts init rather than caching error state as success");
+
+    fs::remove_all("test_v58_mods");
+
+    // 8. Dotted module paths
+    fs::create_directories("test_dotted/lib");
+    {
+        std::ofstream f("test_dotted/lib/math.kek");
+        f << "pub task add(a, b) { give a + b ~ }\n";
+        f.close();
+    }
+    out = runCodeFresh("grab lib.math ~ echo lib.math.add(10, 20) ~", ok, "test_dotted/main.kek");
+    TEST_ASSERT(ok && out.find("=> 30") != std::string::npos, "dotted module path import and invocation");
+    fs::remove_all("test_dotted");
+
+    // 9. Call context diagnostics
+    out = runCodeFresh("task outer() { inner() ~ } task inner() { let x = 1 / 0 ~ } outer() ~", ok);
+    TEST_ASSERT(ok && out.find("at inner()") != std::string::npos && out.find("at outer()") != std::string::npos, "nested task call traceback diagnostics");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.5.6 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.5.8 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -911,6 +995,7 @@ int main() {
     testV050Features();
     testV052Modules();
     testV056RegressionSuite();
+    testV058NewFeaturesAndIntegrations();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

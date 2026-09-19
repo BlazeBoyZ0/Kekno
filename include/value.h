@@ -180,6 +180,7 @@ struct Value {
     }
 
     std::string toString() const;
+    std::string toStringCycleSafe(std::vector<const void*>& visited) const;
     TypeSpec getTypeSpec() const;
 };
 
@@ -380,6 +381,11 @@ inline std::string TypeSpec::toString() const {
 }
 
 inline std::string Value::toString() const {
+    std::vector<const void*> visited;
+    return toStringCycleSafe(visited);
+}
+
+inline std::string Value::toStringCycleSafe(std::vector<const void*>& visited) const {
     if (isNil()) return "nil";
     if (isBool()) return boolean ? "true" : "false";
     if (isInt()) return std::to_string(intVal);
@@ -428,43 +434,54 @@ inline std::string Value::toString() const {
         return "<task>";
     }
     if (isArray()) {
+        if (!array) return "[]";
+        const void* ptr = static_cast<const void*>(array.get());
+        if (std::find(visited.begin(), visited.end(), ptr) != visited.end()) {
+            return "[...]";
+        }
+        visited.push_back(ptr);
         std::string result = "[";
-        if (array) {
-            for (size_t i = 0; i < array->size(); ++i) {
-                if (i > 0) result += ", ";
-                if ((*array)[i].isString()) {
-                    result += "\"" + (*array)[i].toString() + "\"";
-                } else if ((*array)[i].isChar()) {
-                    result += "'" + (*array)[i].toString() + "'";
-                } else {
-                    result += (*array)[i].toString();
-                }
+        for (size_t i = 0; i < array->size(); ++i) {
+            if (i > 0) result += ", ";
+            const Value& elem = (*array)[i];
+            if (elem.isString()) {
+                result += "\"" + elem.toStringCycleSafe(visited) + "\"";
+            } else if (elem.isChar()) {
+                result += "'" + elem.toStringCycleSafe(visited) + "'";
+            } else {
+                result += elem.toStringCycleSafe(visited);
             }
         }
         result += "]";
+        visited.pop_back();
         return result;
     }
     if (isMap()) {
+        if (!map) return "{}";
+        const void* ptr = static_cast<const void*>(map.get());
+        if (std::find(visited.begin(), visited.end(), ptr) != visited.end()) {
+            return "{...}";
+        }
+        visited.push_back(ptr);
         std::string result = "{";
-        if (map) {
-            for (size_t i = 0; i < map->keys.size(); ++i) {
-                if (i > 0) result += ", ";
-                const Value& k = map->keys[i];
-                if (k.isString()) result += "\"" + k.toString() + "\": ";
-                else if (k.isChar()) result += "'" + k.toString() + "': ";
-                else result += k.toString() + ": ";
+        for (size_t i = 0; i < map->keys.size(); ++i) {
+            if (i > 0) result += ", ";
+            const Value& k = map->keys[i];
+            if (k.isString()) result += "\"" + k.toStringCycleSafe(visited) + "\": ";
+            else if (k.isChar()) result += "'" + k.toStringCycleSafe(visited) + "': ";
+            else result += k.toStringCycleSafe(visited) + ": ";
 
-                Value val = map->get(k);
-                if (val.isString()) {
-                    result += "\"" + val.toString() + "\"";
-                } else if (val.isChar()) {
-                    result += "'" + val.toString() + "'";
-                } else {
-                    result += val.toString();
-                }
+            Value val = map->get(k);
+            if (val.isString()) {
+                result += "\"" + val.toStringCycleSafe(visited) + "\"";
+            } else if (val.isChar()) {
+                result += "'" + val.toStringCycleSafe(visited) + "'";
+            } else {
+                result += val.toStringCycleSafe(visited);
             }
         }
         result += "}";
+        visited.pop_back();
         return result;
     }
     return "nil";

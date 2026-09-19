@@ -297,7 +297,7 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
     std::string nameStr = (function && !function->name.empty()) ? "Task '" + function->name + "' " : "Task ";
 
     if (frames.size() >= 65536) {
-        std::cout << "[Runtime Error]: Stack overflow." << std::endl;
+        runtimeError("Stack overflow.");
         return false;
     }
 
@@ -306,7 +306,7 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
     int posCount = argCount - namedCount;
 
     if (posCount < 0) {
-        std::cout << "[Runtime Error]: " << nameStr << "invalid argument count." << std::endl;
+        runtimeError(nameStr + "invalid argument count.");
         return false;
     }
 
@@ -317,8 +317,8 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
             if (expected.kind == TypeKind::ANY || expected.kind == TypeKind::UNTYPED) continue;
 
             if (!checkAndCoerceValueType(expected, stack[stack.size() - argCount + i])) {
-                std::cout << "[Runtime Error]: " << nameStr << "argument " << (i + 1) << " expects type "
-                          << expected.toString() << " but got " << stack[stack.size() - argCount + i].getTypeSpec().toString() << "." << std::endl;
+                runtimeError(nameStr + "argument " + std::to_string(i + 1) + " expects type " +
+                             expected.toString() + " but got " + stack[stack.size() - argCount + i].getTypeSpec().toString() + ".");
                 return false;
             }
         }
@@ -333,7 +333,7 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
     }
 
     if (posCount > totalDeclared) {
-        std::cout << "[Runtime Error]: " << nameStr << "expected " << totalDeclared << " arguments but got " << argCount << "." << std::endl;
+        runtimeError(nameStr + "expected " + std::to_string(totalDeclared) + " arguments but got " + std::to_string(argCount) + ".");
         return false;
     }
 
@@ -359,12 +359,12 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
         }
 
         if (paramIdx == -1) {
-            std::cout << "[Runtime Error]: " << nameStr << "has no parameter named '" << name << "'." << std::endl;
+            runtimeError(nameStr + "has no parameter named '" + name + "'.");
             return false;
         }
 
         if (provided[paramIdx]) {
-            std::cout << "[Runtime Error]: " << nameStr << "duplicate argument '" << name << "' provided." << std::endl;
+            runtimeError(nameStr + "duplicate argument '" + name + "' provided.");
             return false;
         }
 
@@ -375,7 +375,7 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
     for (int i = 0; i < totalDeclared; ++i) {
         if (!provided[i]) {
             std::string pName = (i < static_cast<int>(function->paramNames.size())) ? function->paramNames[i] : std::to_string(i + 1);
-            std::cout << "[Runtime Error]: " << nameStr << "missing required argument '" << pName << "'." << std::endl;
+            runtimeError(nameStr + "missing required argument '" + pName + "'.");
             return false;
         }
     }
@@ -386,8 +386,8 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
             if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
                 if (!checkAndCoerceValueType(expected, finalArgs[i])) {
                     std::string pName = (i < static_cast<int>(function->paramNames.size())) ? function->paramNames[i] : std::to_string(i + 1);
-                    std::cout << "[Runtime Error]: " << nameStr << "argument '" << pName << "' expects type "
-                              << expected.toString() << " but got " << finalArgs[i].getTypeSpec().toString() << "." << std::endl;
+                    runtimeError(nameStr + "argument '" + pName + "' expects type " +
+                                 expected.toString() + " but got " + finalArgs[i].getTypeSpec().toString() + ".");
                     return false;
                 }
             }
@@ -566,23 +566,47 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     if (expected.kind == TypeKind::ARRAY) {
         if (!val.isArray()) return false;
         if (!val.array) return true;
+        // If assigning dynamic/untyped collection to typed variable, create typed copy if needed
+        bool needsCopy = (val.array->typeSpec.elementKind != expected.elementKind) ||
+                         (val.array->typeSpec.kind == TypeKind::ARRAY && val.array->typeSpec.elementKind == TypeKind::ANY && expected.elementKind != TypeKind::ANY);
+        ArrayPtr targetArr = val.array;
+        if (needsCopy) {
+            targetArr = std::make_shared<ObjArray>();
+            targetArr->elements = val.array->elements;
+            targetArr->typeSpec = expected;
+        }
+
         if (expected.elementKind != TypeKind::ANY && expected.elementKind != TypeKind::UNTYPED) {
             TypeSpec elemSpec = expected.elemType ? *expected.elemType : TypeSpec{expected.elementKind};
-            for (size_t i = 0; i < val.array->elements.size(); ++i) {
-                if (!checkAndCoerceValueType(elemSpec, val.array->elements[i])) {
+            for (size_t i = 0; i < targetArr->elements.size(); ++i) {
+                if (!checkAndCoerceValueType(elemSpec, targetArr->elements[i])) {
                     return false;
                 }
             }
         }
-        val.array->typeSpec = expected;
+        if (needsCopy) {
+            val = Value(targetArr);
+        } else {
+            val.array->typeSpec = expected;
+        }
         return true;
     }
     if (expected.kind == TypeKind::MAP) {
         if (!val.isMap()) return false;
         if (!val.map) return true;
+        bool needsCopy = (val.map->typeSpec.keyKind != expected.keyKind || val.map->typeSpec.valueKind != expected.valueKind) ||
+                         (val.map->typeSpec.keyKind == TypeKind::ANY && val.map->typeSpec.valueKind == TypeKind::ANY && (expected.keyKind != TypeKind::ANY || expected.valueKind != TypeKind::ANY));
+        MapPtr targetMap = val.map;
+        if (needsCopy) {
+            targetMap = std::make_shared<ObjMap>();
+            targetMap->table = val.map->table;
+            targetMap->keys = val.map->keys;
+            targetMap->typeSpec = expected;
+        }
+
         TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind};
         TypeSpec valSpec = expected.valType ? *expected.valType : TypeSpec{expected.valueKind};
-        for (auto& pair : val.map->table) {
+        for (auto& pair : targetMap->table) {
             Value kVal = pair.first.val;
             if (keySpec.kind != TypeKind::ANY && keySpec.kind != TypeKind::UNTYPED) {
                 if (!checkAndCoerceValueType(keySpec, kVal)) return false;
@@ -591,7 +615,11 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
                 if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
             }
         }
-        val.map->typeSpec = expected;
+        if (needsCopy) {
+            val = Value(targetMap);
+        } else {
+            val.map->typeSpec = expected;
+        }
         return true;
     }
     return true;
@@ -777,9 +805,9 @@ VM::VM() {
         return Value(input);
     }));
 
-    builtins["scan"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "scan()");
-        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: scan() expects 1 argument.");
+    auto typeofFn = NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x", "target"}}, "typeof()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: typeof() expects 1 argument.");
         Value val = aMap.get("val");
         switch (val.type) {
             case ValueType::INT: return Value(std::string("int"));
@@ -790,13 +818,16 @@ VM::VM() {
             case ValueType::ARRAY: return Value(std::string("array"));
             case ValueType::MAP: return Value(std::string("map"));
             case ValueType::FUNCTION:
-            case ValueType::NATIVE: return Value(std::string("task"));
+            case ValueType::NATIVE: return Value(std::string("func"));
             case ValueType::MODULE: return Value(std::string("module"));
             case ValueType::NIL: return Value(std::string("nil"));
             case ValueType::SLICE: return Value(std::string("slice"));
         }
         return Value(std::string("nil"));
-    }));
+    });
+
+    builtins["typeof"] = Value(typeofFn);
+    builtins["scan"] = Value(typeofFn);
 
     // Explicit Type Casts
     builtins["cast_int"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
@@ -1487,11 +1518,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                             Value valVal = aMap.get("val");
                             for (auto it = arr->elements.begin(); it != arr->elements.end(); ++it) {
                                 if (it->isEqual(valVal)) {
+                                    Value removed = *it;
                                     arr->erase(it);
-                                    return Value(true);
+                                    return removed;
                                 }
                             }
-                            return Value(false);
+                            return Value(); // nil when not found
                         }
                     })));
                 } else if (memberName == "contains") {
@@ -2422,8 +2454,11 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (isNew && subClosure) {
                 push(Value(subClosure));
                 std::vector<std::string> emptyNames;
-                call(subClosure, 0, emptyNames, true);
-
+                if (!call(subClosure, 0, emptyNames, true)) {
+                    // Initialization failed, roll back module cache
+                    moduleCache.erase(grabbedMod->path);
+                    return false;
+                }
             }
             break;
         }
@@ -2523,11 +2558,11 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value b = pop();
             Value a = pop();
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '/' only supports numbers!" << std::endl;
+                runtimeError("'/' only supports numbers!");
                 return false;
             }
             if (b.asFloat() == 0.0) {
-                std::cout << "[Runtime Error]: Division by zero!" << std::endl;
+                runtimeError("Division by zero!");
                 return false;
             }
             if (a.isInt() && b.isInt()) {
@@ -2693,6 +2728,37 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         }
     }
     return true;
+}
+
+void VM::runtimeError(const std::string& message) {
+    std::cout << "[Runtime Error]: " << message << std::endl;
+    for (int i = static_cast<int>(frames.size()) - 1; i >= 0; i--) {
+        CallFrame& frame = frames[i];
+        FunctionPtr function = frame.closure->function;
+        size_t instruction = frame.ip - function->chunk.code.data() - 1;
+        int line = function->chunk.getLine(instruction);
+        int column = function->chunk.getColumn(instruction);
+        std::string fnName = function->name.empty() ? "<script>" : function->name;
+
+        std::cout << "  at " << fnName << "() [line " << line << ", col " << column << "]" << std::endl;
+
+        if (!function->chunk.source.empty()) {
+            std::string lineStr = Lexer(function->chunk.source).getLineString(line);
+            if (!lineStr.empty()) {
+                std::cout << "    " << lineStr << std::endl;
+                std::cout << "    ";
+                int col = column > 1 ? column - 1 : 0;
+                for (int c = 0; c < col; c++) {
+                    if (c < static_cast<int>(lineStr.size()) && lineStr[c] == '\t') {
+                        std::cout << "\t";
+                    } else {
+                        std::cout << " ";
+                    }
+                }
+                std::cout << "^" << std::endl;
+            }
+        }
+    }
 }
 
 void VM::run(Chunk& mainChunk, const std::string& scriptPath) {
