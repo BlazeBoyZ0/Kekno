@@ -89,6 +89,22 @@ std::string Lexer::getLineString(int targetLine) const {
     return "";
 }
 
+Token Lexer::peekToken() {
+    size_t savedCurrent = current;
+    int savedLine = line;
+    int savedColumn = column;
+    bool savedUnclosedComment = unclosedComment;
+
+    Token t = nextToken();
+
+    current = savedCurrent;
+    line = savedLine;
+    column = savedColumn;
+    unclosedComment = savedUnclosedComment;
+
+    return t;
+}
+
 Token Lexer::nextToken() {
     int startLine = line;
     int startCol = column;
@@ -369,7 +385,16 @@ Token Lexer::nextToken() {
         case ']': t.type = TokenType::RBRACKET; break;
         case ',': t.type = TokenType::COMMA; break;
         case ':': t.type = TokenType::COLON; break;
-        case '.': t.type = TokenType::DOT; break;
+        case '.':
+            if (peek() == '.' && peekNext() == '.') {
+                advance(); // consume second '.'
+                advance(); // consume third '.'
+                t.type = TokenType::DOT_DOT_DOT;
+                t.text = "...";
+            } else {
+                t.type = TokenType::DOT;
+            }
+            break;
         case '~': t.type = TokenType::TILDE; break;
         case '=':
             if (match('=')) { t.type = TokenType::EQUAL_EQUAL; t.text = "=="; }
