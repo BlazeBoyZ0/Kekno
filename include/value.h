@@ -8,9 +8,11 @@
 #include <cstdint>
 #include <iomanip>
 #include <cmath>
+#include <stdexcept>
+#include <algorithm>
 #include "chunk.h"
 
-enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE };
+enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE };
 
 enum class TypeKind {
     ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC
@@ -50,12 +52,14 @@ struct ObjUpvalue;
 struct ObjFunction;
 struct ObjClosure;
 struct ObjModule;
+struct ObjSlice;
 
 using UpvaluePtr = std::shared_ptr<ObjUpvalue>;
 using FunctionPtr = std::shared_ptr<ObjFunction>;
 using ClosurePtr = std::shared_ptr<ObjClosure>;
 using ModulePtr = std::shared_ptr<ObjModule>;
-using NativeFn = std::function<Value(int argCount, Value* args)>;
+using SlicePtr = std::shared_ptr<ObjSlice>;
+using NativeFn = std::function<Value(int argCount, Value* args, const std::vector<std::string>& argNames)>;
 
 struct SymbolInfo {
     bool isPublic = false;
@@ -74,14 +78,21 @@ struct ObjModule {
 struct ObjArray {
     std::vector<Value> elements;
     TypeSpec typeSpec{TypeKind::ARRAY};
+    int lockCount = 0;
+
+    void checkLock() const {
+        if (lockCount > 0) {
+            throw std::runtime_error("[Runtime Error]: Cannot structurally mutate collection during higher-order iteration.");
+        }
+    }
 
     size_t size() const { return elements.size(); }
     bool empty() const { return elements.empty(); }
-    void resize(size_t n) { elements.resize(n); }
-    void push_back(const Value& val) { elements.push_back(val); }
+    void resize(size_t n) { checkLock(); elements.resize(n); }
+    void push_back(const Value& val) { checkLock(); elements.push_back(val); }
     Value& back() { return elements.back(); }
-    void pop_back() { elements.pop_back(); }
-    void erase(std::vector<Value>::iterator it) { elements.erase(it); }
+    void pop_back() { checkLock(); elements.pop_back(); }
+    void erase(std::vector<Value>::iterator it) { checkLock(); elements.erase(it); }
     auto begin() { return elements.begin(); }
     auto end() { return elements.end(); }
     Value& operator[](size_t idx) { return elements[idx]; }
@@ -90,7 +101,6 @@ struct ObjArray {
 
 using ArrayPtr = std::shared_ptr<ObjArray>;
 using MapPtr = std::shared_ptr<ObjMap>;
-using FunctionPtr = std::shared_ptr<ObjFunction>;
 
 struct Value {
     ValueType type;
@@ -107,19 +117,21 @@ struct Value {
     MapPtr map;
     NativeFn nativeFn;
     ModulePtr module;
+    SlicePtr slice;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
-    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
-    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
-    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
     Value(FunctionPtr fn);
     Value(ClosurePtr cl);
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr) {}
-    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr) {}
-    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr) {}
-    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod) {}
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr) {}
+    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr) {}
+    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -133,6 +145,7 @@ struct Value {
     bool isMap() const { return type == ValueType::MAP; }
     bool isNative() const { return type == ValueType::NATIVE; }
     bool isModule() const { return type == ValueType::MODULE; }
+    bool isSlice() const { return type == ValueType::SLICE; }
 
     double asFloat() const {
         if (type == ValueType::INT) return static_cast<double>(intVal);
@@ -160,6 +173,7 @@ struct Value {
             case ValueType::ARRAY: return array == other.array;
             case ValueType::MAP: return map == other.map;
             case ValueType::MODULE: return module == other.module;
+            case ValueType::SLICE: return slice == other.slice;
             case ValueType::NATIVE: return false;
         }
         return false;
@@ -167,6 +181,102 @@ struct Value {
 
     std::string toString() const;
     TypeSpec getTypeSpec() const;
+};
+
+struct ObjSlice {
+    Value start;
+    Value end;
+    Value step;
+    bool hasStart = false;
+    bool hasEnd = false;
+    bool hasStep = false;
+    bool isCallMarker = false;
+};
+
+struct MapKey {
+    Value val;
+    bool operator==(const MapKey& other) const {
+        return val.isEqual(other.val);
+    }
+};
+
+struct MapKeyHash {
+    std::size_t operator()(const MapKey& k) const {
+        const Value& v = k.val;
+        if (v.isNumber()) {
+            return std::hash<double>()(v.asFloat());
+        }
+        if (v.isString()) return std::hash<std::string>()(v.str);
+        if (v.isChar()) return std::hash<char32_t>()(v.charVal);
+        if (v.isBool()) return std::hash<bool>()(v.boolean);
+        return 0;
+    }
+};
+
+struct ObjMap {
+    std::unordered_map<MapKey, Value, MapKeyHash> table;
+    std::vector<Value> keys;
+    TypeSpec typeSpec{TypeKind::MAP};
+    int lockCount = 0;
+
+    void checkLock() const {
+        if (lockCount > 0) {
+            throw std::runtime_error("[Runtime Error]: Cannot structurally mutate collection during higher-order iteration.");
+        }
+    }
+
+    static bool isSupportedKey(const Value& val) {
+        return val.isInt() || val.isFloat() || val.isString() || val.isChar() || val.isBool();
+    }
+
+    void set(const Value& key, const Value& val) {
+        checkLock();
+        MapKey mk{key};
+        auto it = table.find(mk);
+        if (it != table.end()) {
+            for (auto kIt = keys.begin(); kIt != keys.end(); ++kIt) {
+                if (kIt->isEqual(key)) {
+                    keys.erase(kIt);
+                    break;
+                }
+            }
+            keys.push_back(key);
+            it->second = val;
+        } else {
+            keys.push_back(key);
+            table[mk] = val;
+        }
+    }
+
+    Value get(const Value& key) const {
+        MapKey mk{key};
+        auto it = table.find(mk);
+        if (it != table.end()) return it->second;
+        return Value();
+    }
+
+    bool contains(const Value& key) const {
+        MapKey mk{key};
+        return table.find(mk) != table.end();
+    }
+
+    bool remove(const Value& key, Value* outVal = nullptr) {
+        checkLock();
+        MapKey mk{key};
+        auto it = table.find(mk);
+        if (it != table.end()) {
+            if (outVal) *outVal = it->second;
+            table.erase(it);
+            for (auto kIt = keys.begin(); kIt != keys.end(); ++kIt) {
+                if (kIt->isEqual(key)) {
+                    keys.erase(kIt);
+                    break;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
 };
 
 struct ObjUpvalue {
@@ -187,6 +297,7 @@ struct ObjFunction {
     int upvalueCount = 0;
     Chunk chunk;
     std::string name;
+    std::vector<std::string> paramNames;
     std::vector<TypeSpec> paramTypes;
     std::vector<TypeSpec> localTypes;
     ModulePtr module = nullptr;
@@ -198,41 +309,13 @@ struct ObjClosure {
     ModulePtr module = nullptr;
 };
 
-struct ObjMap {
-    std::unordered_map<std::string, Value> table;
-    std::vector<std::string> keys;
-    TypeSpec typeSpec{TypeKind::MAP};
-
-    void set(const std::string& key, const Value& val) {
-        if (table.find(key) == table.end()) {
-            keys.push_back(key);
-        }
-        table[key] = val;
-    }
-
-    bool remove(const std::string& key) {
-        auto it = table.find(key);
-        if (it != table.end()) {
-            table.erase(it);
-            for (auto kIt = keys.begin(); kIt != keys.end(); ++kIt) {
-                if (*kIt == key) {
-                    keys.erase(kIt);
-                    break;
-                }
-            }
-            return true;
-        }
-        return false;
-    }
-};
-
 inline Value::Value(FunctionPtr fn)
-    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(fn), closure(std::make_shared<ObjClosure>()), array(nullptr), map(nullptr), nativeFn(nullptr) {
+    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(fn), closure(std::make_shared<ObjClosure>()), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {
     closure->function = fn;
 }
 
 inline Value::Value(ClosurePtr cl)
-    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(cl ? cl->function : nullptr), closure(cl), array(nullptr), map(nullptr), nativeFn(nullptr) {}
+    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(cl ? cl->function : nullptr), closure(cl), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
 
 inline bool Value::isFalsey() const {
     if (isNil()) return true;
@@ -242,7 +325,7 @@ inline bool Value::isFalsey() const {
     if (isChar()) return charVal == 0;
     if (isString()) return str.empty();
     if (isArray()) return array == nullptr || array->empty();
-    if (isMap()) return map == nullptr || map->table.empty();
+    if (isMap()) return map == nullptr || map->keys.empty();
     return false;
 }
 
@@ -366,17 +449,18 @@ inline std::string Value::toString() const {
         if (map) {
             for (size_t i = 0; i < map->keys.size(); ++i) {
                 if (i > 0) result += ", ";
-                const std::string& k = map->keys[i];
-                result += "\"" + k + "\": ";
-                auto it = map->table.find(k);
-                if (it != map->table.end()) {
-                    if (it->second.isString()) {
-                        result += "\"" + it->second.toString() + "\"";
-                    } else if (it->second.isChar()) {
-                        result += "'" + it->second.toString() + "'";
-                    } else {
-                        result += it->second.toString();
-                    }
+                const Value& k = map->keys[i];
+                if (k.isString()) result += "\"" + k.toString() + "\": ";
+                else if (k.isChar()) result += "'" + k.toString() + "': ";
+                else result += k.toString() + ": ";
+
+                Value val = map->get(k);
+                if (val.isString()) {
+                    result += "\"" + val.toString() + "\"";
+                } else if (val.isChar()) {
+                    result += "'" + val.toString() + "'";
+                } else {
+                    result += val.toString();
                 }
             }
         }

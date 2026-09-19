@@ -66,18 +66,6 @@ static void testNativeFunctionsAndMath() {
     out = runCodeFresh("echo has([10, 20], 20) ~", ok);
     TEST_ASSERT(ok && out.find("=> true") != std::string::npos, "has array true");
 
-    // purge()
-    out = runCodeFresh("let m = {\"a\": 1, \"b\": 2} ~ purge(m, \"a\") ~ echo size(m) ~", ok);
-    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "purge map");
-    out = runCodeFresh("let arr = [10, 20, 30] ~ purge(arr, 1) ~ echo arr ~", ok);
-    TEST_ASSERT(ok && out.find("[10, 30]") != std::string::npos, "purge array");
-
-    // inject() and expel()
-    out = runCodeFresh("let arr = [] ~ inject(arr, 42) ~ echo arr ~", ok);
-    TEST_ASSERT(ok && out.find("[42]") != std::string::npos, "inject valid");
-    out = runCodeFresh("let arr = [10, 20] ~ echo expel(arr) ~ echo arr ~", ok);
-    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos && out.find("[10]") != std::string::npos, "expel valid");
-
     // scan()
     out = runCodeFresh("echo scan(123) ~ echo scan(3.14) ~ echo scan('a') ~ echo scan(\"hi\") ~ echo scan(true) ~ echo scan([]) ~ echo scan({}) ~ echo scan(nil) ~", ok);
     TEST_ASSERT(ok && out.find("int") != std::string::npos && out.find("float") != std::string::npos && out.find("char") != std::string::npos && out.find("string") != std::string::npos, "scan types");
@@ -120,44 +108,199 @@ static void testNumericAndArithmetic() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "integer overflow error");
 }
 
-static void testCharAndStringUtilities() {
+static void testArrayMethods() {
     bool ok = false;
     std::string out;
 
-    // Char literal & UTF-8
-    out = runCodeFresh("let c = 'A' ~ echo scan(c) ~ echo c ~", ok);
-    TEST_ASSERT(ok && out.find("=> char") != std::string::npos && out.find("=> A") != std::string::npos, "char literal");
+    // push() with multiple values & spread syntax
+    out = runCodeFresh("let nums = [1] ~ nums.push(2, 3) ~ let other = [4, 5] ~ nums.push(other...) ~ echo nums ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2, 3, 4, 5]") != std::string::npos, "array push multiple and spread");
 
-    // String/char concatenation in both directions
-    out = runCodeFresh("let s = \"hello \" + 'W' ~ echo s ~ echo 'W' + \" world\" ~", ok);
-    TEST_ASSERT(ok && out.find("hello W") != std::string::npos && out.find("W world") != std::string::npos, "string char concat");
+    // pop() default and indexed with negative indices
+    out = runCodeFresh("let nums = [10, 20, 30, 40] ~ echo nums.pop() ~ echo nums.pop(ind=0) ~ echo nums.pop(ind=-1) ~ echo nums ~", ok);
+    TEST_ASSERT(ok && out.find("=> 40") != std::string::npos && out.find("=> 10") != std::string::npos && out.find("=> 30") != std::string::npos && out.find("[20]") != std::string::npos, "array pop default & indexed");
 
-    // String builtins: upper, lower, trim, contains, starts_with, ends_with, split, join, replace
-    out = runCodeFresh("echo upper(\"kekno\") ~ echo lower(\"KEKNO\") ~ echo trim(\"  hi  \") ~", ok);
-    TEST_ASSERT(ok && out.find("=> KEKNO") != std::string::npos && out.find("=> kekno") != std::string::npos && out.find("=> hi") != std::string::npos, "upper lower trim");
+    // insert()
+    out = runCodeFresh("let nums = [1, 3] ~ nums.insert(ind=1, val=2) ~ nums.insert(ind=-1, val=4) ~ echo nums ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2, 3, 4]") != std::string::npos, "array insert ind and negative -1 append");
 
-    out = runCodeFresh("echo contains(\"abcdef\", \"cd\") ~ echo starts_with(\"abcdef\", \"ab\") ~ echo ends_with(\"abcdef\", \"ef\") ~", ok);
-    TEST_ASSERT(ok && out.find("=> true") != std::string::npos, "contains starts_with ends_with");
+    // remove() mutually exclusive ind and val
+    out = runCodeFresh("let nums = [10, 20, 30] ~ echo nums.remove(ind=1) ~ echo nums.remove(val=30) ~ echo nums ~", ok);
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos && out.find("=> true") != std::string::npos && out.find("[10]") != std::string::npos, "array remove ind & val modes");
 
-    out = runCodeFresh("let parts = split(\"a,b,c\", \",\") ~ echo join(parts, \"-\") ~ echo replace(\"hello world\", \"world\", \"Kekno\") ~", ok);
-    TEST_ASSERT(ok && out.find("a-b-c") != std::string::npos && out.find("hello Kekno") != std::string::npos, "split join replace");
+    out = runCodeFresh("let nums = [10] ~ nums.remove(ind=0, val=10) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "array remove both ind and val error");
+
+    // contains() and index_of() value-based numeric equality
+    out = runCodeFresh("let nums = [1, 5.0, \"a\"] ~ echo nums.contains(5) ~ echo nums.index_of(5) ~ echo nums.index_of(99) ~", ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos && out.find("=> 1") != std::string::npos && out.find("=> nil") != std::string::npos, "contains and index_of numeric equality");
+
+    // reverse() & clear() & .length
+    out = runCodeFresh("let nums = [1, 2, 3] ~ echo nums.length ~ nums.reverse() ~ echo nums ~ echo nums.clear() ~ echo nums.length ~", ok);
+    TEST_ASSERT(ok && out.find("=> 3") != std::string::npos && out.find("[3, 2, 1]") != std::string::npos && out.find("[]") != std::string::npos && out.find("=> 0") != std::string::npos, "reverse clear length");
+
+    // sort() comparable values and incomparable error
+    out = runCodeFresh("let nums = [3, 1.5, 2] ~ nums.sort() ~ echo nums ~", ok);
+    TEST_ASSERT(ok && out.find("[1.5, 2, 3]") != std::string::npos, "sort mixed numeric");
+
+    out = runCodeFresh("let arr = [1, \"a\"] ~ arr.sort() ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("non-comparable") != std::string::npos, "sort non-comparable error");
+
+    // slicing syntax & method
+    out = runCodeFresh("let nums = [0, 1, 2, 3, 4] ~ echo nums[1:4] ~ echo nums[::-1] ~ echo nums.slice(start=1, end=3) ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2, 3]") != std::string::npos && out.find("[4, 3, 2, 1, 0]") != std::string::npos && out.find("[1, 2]") != std::string::npos, "array slicing syntax and method");
+
+    out = runCodeFresh("let nums = [1, 2] ~ echo nums[::0] ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("step cannot be zero") != std::string::npos, "slice step 0 error");
+
+    // join()
+    out = runCodeFresh("let arr = [1, \"a\", true] ~ echo arr.join(\"-\") ~ echo [].join(\",\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1-a-true") != std::string::npos, "join method");
 }
 
-static void testCasts() {
+static void testMapMethods() {
     bool ok = false;
     std::string out;
 
-    // cast_int() nearest rounding with .5 upward
-    out = runCodeFresh("echo cast_int(3.4) ~ echo cast_int(3.5) ~ echo cast_int(\"42\") ~", ok);
-    TEST_ASSERT(ok && out.find("=> 3") != std::string::npos && out.find("=> 4") != std::string::npos && out.find("=> 42") != std::string::npos, "cast_int rounding");
+    // put(), get(), contains(), remove(), keys(), values(), clear(), .length
+    out = runCodeFresh("let data = {} ~ data.put(key=\"name\", val=\"BBZ\") ~ data[\"age\"] = 25 ~ echo data.length ~ echo data.get(\"name\") ~ echo data.contains(\"age\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> 2") != std::string::npos && out.find("=> BBZ") != std::string::npos && out.find("=> true") != std::string::npos, "map put get contains length");
 
-    // cast_float(), cast_string(), cast_char(), cast_array(), cast_map()
-    out = runCodeFresh("echo cast_float(10) ~ echo cast_string(100) ~ echo cast_char(\"X\") ~ echo cast_array(\"hi\") ~", ok);
-    TEST_ASSERT(ok && out.find("=> 10.0") != std::string::npos && out.find("=> 100") != std::string::npos && out.find("=> X") != std::string::npos && out.find("['h', 'i']") != std::string::npos, "casts");
+    // Updating existing key moves key to end of insertion order
+    out = runCodeFresh("let m = {} ~ m.put(\"a\", 1) ~ m.put(\"b\", 2) ~ m.put(\"a\", 3) ~ echo m.keys() ~ echo m.values() ~", ok);
+    TEST_ASSERT(ok && out.find("[\"b\", \"a\"]") != std::string::npos && out.find("[2, 3]") != std::string::npos, "map insertion order re-insertion");
 
-    // cast_char() rejected on multi-char string
-    out = runCodeFresh("cast_char(\"hello\") ~", ok);
-    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "cast_char multi-char reject");
+    // remove() returns removed value or nil
+    out = runCodeFresh("let m = {\"a\": 10} ~ echo m.remove(\"a\") ~ echo m.remove(\"missing\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> 10") != std::string::npos && out.find("=> nil") != std::string::npos, "map remove return value");
+
+    // Scalar key types (int, float, string, char, bool) & numeric key equality (1 == 1.0)
+    out = runCodeFresh("let m = {} ~ m[1] = \"one\" ~ m[1.0] = \"float_one\" ~ m['c'] = \"char_c\" ~ m[true] = \"bool_true\" ~ echo m.length ~ echo m[1] ~", ok);
+    TEST_ASSERT(ok && out.find("=> 3") != std::string::npos && out.find("=> float_one") != std::string::npos, "scalar key types & numeric equality 1 == 1.0");
+
+    // Rejection of invalid key types (array, map, func)
+    out = runCodeFresh("let m = {} ~ m[[1, 2]] = 10 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("supported scalar type") != std::string::npos, "reject array key in map");
+
+    // Typed maps
+    out = runCodeFresh("let map<string, int> tm = {\"a\": 1} ~ tm.put(key=\"b\", val=\"bad\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed map value violation");
+}
+
+static void testHigherOrderCollectionOperations() {
+    bool ok = false;
+    std::string out;
+
+    // Array map(), filter(), reduce()
+    out = runCodeFresh("let nums = [1, 2, 3, 4] ~ echo nums.map(task(x) { give x * 2 ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("[2, 4, 6, 8]") != std::string::npos, "array map");
+
+    out = runCodeFresh("let nums = [1, 2, 3, 4] ~ echo nums.filter(task(x) { give x % 2 == 0 ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("[2, 4]") != std::string::npos, "array filter");
+
+    out = runCodeFresh("let nums = [1, 2, 3, 4] ~ echo nums.reduce(task(acc, x) { give acc + x ~ }, 10) ~ echo nums.reduce(task(acc, x) { give acc + x ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos && out.find("=> 10") != std::string::npos, "array reduce with and without initial");
+
+    // Empty reduce fallback
+    out = runCodeFresh("echo [].reduce(task(a, b) { give a + b ~ }) ~ echo [].reduce(task(a, b) { give a + b ~ }, 100) ~", ok);
+    TEST_ASSERT(ok && out.find("=> nil") != std::string::npos && out.find("=> 100") != std::string::npos, "empty array reduce fallback");
+
+    // Map map(), filter(), reduce()
+    out = runCodeFresh("let m = {\"a\": 1, \"b\": 2} ~ echo m.map(task(val, key) { give val * 10 ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("{\"a\": 10, \"b\": 20}") != std::string::npos, "map map()");
+
+    out = runCodeFresh("let m = {\"a\": 1, \"b\": 2} ~ echo m.filter(task(val, key) { give val > 1 ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("{\"b\": 2}") != std::string::npos, "map filter()");
+
+    // Callback parameter count validation (error if callback declares too many parameters)
+    out = runCodeFresh("let nums = [1] ~ nums.map(task(a, b, c, d) { give a ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("more parameters") != std::string::npos, "callback declared too many parameters error");
+
+    // Structural mutation guard during iteration error
+    out = runCodeFresh("let nums = [1, 2] ~ nums.map(task(x) { nums.push(99) ~ give x ~ }) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Cannot structurally mutate") != std::string::npos, "structural mutation guard error");
+}
+
+static void testNamedArguments() {
+    bool ok = false;
+    std::string out;
+
+    // Positional + named call
+    out = runCodeFresh("task greet(greeting, name) { give greeting + \" \" + name ~ } echo greet(name=\"BBZ\", greeting=\"Hello\") ~", ok);
+    TEST_ASSERT(ok && out.find("Hello BBZ") != std::string::npos, "task named arguments");
+
+    // Unexpected argument name error
+    out = runCodeFresh("task foo(a) { give a ~ } foo(bad=1) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("has no parameter named 'bad'") != std::string::npos, "unexpected argument name error");
+
+    // Duplicate argument error
+    out = runCodeFresh("task foo(a) { give a ~ } foo(10, a=20) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("duplicate argument 'a'") != std::string::npos, "duplicate argument error");
+
+    // Missing argument error
+    out = runCodeFresh("task foo(a, b) { give a + b ~ } foo(a=1) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("missing required argument 'b'") != std::string::npos, "missing argument error");
+}
+
+static void testStringMethodsAndUnicode() {
+    bool ok = false;
+    std::string out;
+
+    // Unicode indexing, slicing, .length, split("")
+    out = runCodeFresh("let s = \"👋 world\" ~ echo scan(s[0]) ~ echo s.length ~ echo s[0:2] ~ echo s.split(\"\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> char") != std::string::npos && out.find("=> 7") != std::string::npos && out.find("👋 ") != std::string::npos, "unicode indexing slicing length split");
+
+    // String methods: upper, lower, trim, contains, starts_with, ends_with, split, replace
+    out = runCodeFresh("let s = \"  Hello World  \" ~ echo s.trim().upper() ~ echo s.trim().lower() ~", ok);
+    TEST_ASSERT(ok && out.find("HELLO WORLD") != std::string::npos && out.find("hello world") != std::string::npos, "string upper lower trim methods");
+
+    out = runCodeFresh("let text = \"a,b,,c\" ~ echo text.split(\",\") ~ echo \"a b c\".split() ~", ok);
+    TEST_ASSERT(ok && out.find("[\"a\", \"b\", \"\", \"c\"]") != std::string::npos && out.find("[\"a\", \"b\", \"c\"]") != std::string::npos, "string split modes");
+
+    // Replace modes
+    // Value mode replaces ONLY first occurrence
+    out = runCodeFresh("echo \"a b a b\".replace(val=\"a\", replacement=\"X\") ~", ok);
+    TEST_ASSERT(ok && out.find("X b a b") != std::string::npos, "replace value mode first match only");
+
+    // Empty val error
+    out = runCodeFresh("\"hello\".replace(val=\"\", replacement=\"X\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("val cannot be empty") != std::string::npos, "replace empty val error");
+
+    // Index mode
+    out = runCodeFresh("echo \"hello world\".replace(ind=5, replacement=\" Kekno\") ~", ok);
+    TEST_ASSERT(ok && out.find("hello Kekno") != std::string::npos, "replace index mode");
+
+    // Slice range mode
+    out = runCodeFresh("echo \"hello world\".replace(ind=1:5, replacement=\"i\") ~", ok);
+    TEST_ASSERT(ok && out.find("hi world") != std::string::npos, "replace slice range mode");
+}
+
+static void testRemovedLegacyAPIsAndCasts() {
+    bool ok = false;
+    std::string out;
+
+    // Check that legacy APIs are removed and throw undefined error
+    out = runCodeFresh("purge({}, \"a\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Undefined variable 'purge'") != std::string::npos, "removed purge API");
+
+    out = runCodeFresh("inject([], 1) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Undefined variable 'inject'") != std::string::npos, "removed inject API");
+
+    out = runCodeFresh("expel([1]) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Undefined variable 'expel'") != std::string::npos, "removed expel API");
+
+    out = runCodeFresh("cast_num(\"123\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Undefined variable 'cast_num'") != std::string::npos, "removed cast_num API");
+
+    out = runCodeFresh("cast_str(123) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Undefined variable 'cast_str'") != std::string::npos, "removed cast_str API");
+
+    out = runCodeFresh("upper(\"abc\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Undefined variable 'upper'") != std::string::npos, "removed global upper API");
+
+    // Explicit casts
+    out = runCodeFresh("echo cast_int(3.7) ~ echo cast_float(5) ~ echo cast_string(true) ~ echo cast_char(\"Z\") ~ echo cast_array(\"ab\") ~ echo cast_map({}) ~", ok);
+    TEST_ASSERT(ok && out.find("=> 4") != std::string::npos && out.find("=> 5.0") != std::string::npos && out.find("=> true") != std::string::npos && out.find("=> Z") != std::string::npos && out.find("['a', 'b']") != std::string::npos, "explicit cast functions");
 }
 
 static void testControlFlowForElseIfAndConst() {
@@ -267,14 +410,13 @@ static void testDiagnostics() {
 static void test16BitOperandLimits() {
     Chunk chunk;
     Value v(static_cast<int64_t>(10));
-    // Add 65536 constants to chunk to test constant pool 16-bit limit
     try {
         for (int i = 0; i < 65536; i++) {
             chunk.addConstant(v);
         }
         bool threw = false;
         try {
-            chunk.addConstant(v); // 65537th constant
+            chunk.addConstant(v);
         } catch (const std::runtime_error& err) {
             threw = true;
             std::string msg = err.what();
@@ -290,11 +432,9 @@ static void testGrabAndVMState() {
     bool ok = false;
     std::string out;
 
-    // Missing module error
     out = runCodeFresh("grab non_existent_mod_12345 ~", ok);
     TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("Could not find module 'non_existent_mod_12345'") != std::string::npos, "grab missing module diagnostic");
 
-    // Valid grab module
     {
         std::ofstream validFile("temp_valid.kek");
         validFile << "pub task addTwo(a, b) { give a + b ~ } pub let exportedVal = 42 ~";
@@ -310,7 +450,6 @@ static void testV046Patches() {
     bool ok = false;
     std::string out;
 
-    // 1. Type checking
     out = runCodeFresh("task testArr(array<int> nums) { echo nums ~ } testArr([1, 2, 3]) ~", ok);
     TEST_ASSERT(ok && out.find("[1, 2, 3]") != std::string::npos, "typed task param valid array<int>");
 
@@ -362,14 +501,12 @@ static void testV046Patches() {
     out = runCodeFresh("let float f = 10 ~ echo f ~", ok);
     TEST_ASSERT(ok && out.find("=> 10.0") != std::string::npos, "float variable accepts int via implicit coercion");
 
-    // 2. Char literal crash fix
     out = runCodeFresh("echo 'A' ~", ok);
     TEST_ASSERT(ok && out.find("=> A") != std::string::npos, "normal char literal echo");
 
     out = runCodeFresh("echo '\\z' ~", ok);
     TEST_ASSERT(!ok && out.find("Syntax Error") != std::string::npos, "malformed char literal gives standard syntax error");
 
-    // 3. Constant pool overflow error handling
     std::string codeWithConsts = "";
     for (int i = 0; i < 65537; i++) {
         codeWithConsts += "let x" + std::to_string(i) + " = " + std::to_string(i) + " ~\n";
@@ -377,7 +514,6 @@ static void testV046Patches() {
     out = runCodeFresh(codeWithConsts, ok);
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Constant pool limit exceeded") != std::string::npos, "compiler constant pool overflow caught gracefully");
 
-    // 4. Integer power overflow & zero negative power
     out = runCodeFresh("echo 2 ^ 63 ~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "2^63 power overflow error");
 
@@ -390,14 +526,12 @@ static void testV046Patches() {
     out = runCodeFresh("echo 0 ^ -1 ~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "0^-1 runtime error");
 
-    // 5. float -> int conversion range check
     out = runCodeFresh("echo cast_int(1000000000000000000000000000000000000000000.0) ~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("out of 64-bit integer range") != std::string::npos, "cast_int overflow error");
 
     out = runCodeFresh("echo cast_int(3.4) ~ echo cast_int(3.5) ~", ok);
     TEST_ASSERT(ok && out.find("=> 3") != std::string::npos && out.find("=> 4") != std::string::npos, "cast_int rounding preserved");
 
-    // 6. INT64_MIN division / modulo protection
     out = runCodeFresh("let minVal = -9223372036854775807 - 1 ~ echo minVal / -1 ~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "INT64_MIN / -1 runtime error");
 
@@ -409,7 +543,6 @@ static void testV050Features() {
     bool ok = false;
     std::string out;
 
-    // 1. func type parameter & function values
     std::string funcCode =
         "task add(int a, int b) {\n"
         "    give a + b~\n"
@@ -422,15 +555,12 @@ static void testV050Features() {
     out = runCodeFresh(funcCode, ok);
     TEST_ASSERT(ok && out.find("=> 30") != std::string::npos, "func parameter and call");
 
-    // Invalid func parameter type rejection
     out = runCodeFresh("task run(func f) { give f()~ } run(123)~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("expects type func") != std::string::npos, "func param type mismatch error");
 
-    // Calling non-task value error
     out = runCodeFresh("let x = 100~ x()~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Can only call task values") != std::string::npos, "call non-task error");
 
-    // 2. Closures outliving parent function
     std::string adderCode =
         "task makeAdder(int x) {\n"
         "    task add(int y) {\n"
@@ -443,7 +573,6 @@ static void testV050Features() {
     out = runCodeFresh(adderCode, ok);
     TEST_ASSERT(ok && out.find("=> 15") != std::string::npos, "closure outliving parent function frame");
 
-    // Independent closures
     std::string indepCode =
         "task makeAdder(int x) {\n"
         "    task add(int y) {\n"
@@ -458,7 +587,6 @@ static void testV050Features() {
     out = runCodeFresh(indepCode, ok);
     TEST_ASSERT(ok && out.find("=> 6") != std::string::npos && out.find("=> 21") != std::string::npos, "multiple independent closures");
 
-    // Captured variable mutation & sharing
     std::string counterCode =
         "task makeCounter() {\n"
         "    let count = 0~\n"
@@ -475,7 +603,6 @@ static void testV050Features() {
     out = runCodeFresh(counterCode, ok);
     TEST_ASSERT(ok && out.find("=> 1") != std::string::npos && out.find("=> 2") != std::string::npos && out.find("=> 3") != std::string::npos, "captured variable mutation");
 
-    // Shared upvalue across multiple closures
     std::string sharedUpvalueCode =
         "task makePair() {\n"
         "    let x = 10~\n"
@@ -492,7 +619,6 @@ static void testV050Features() {
     out = runCodeFresh(sharedUpvalueCode, ok);
     TEST_ASSERT(ok && out.find("=> 10") != std::string::npos && out.find("=> 42") != std::string::npos, "shared upvalue mutation across closures");
 
-    // Nested closures (3 levels)
     std::string nestedClosureCode =
         "task level1(a) {\n"
         "    task level2(b) {\n"
@@ -507,7 +633,6 @@ static void testV050Features() {
     out = runCodeFresh(nestedClosureCode, ok);
     TEST_ASSERT(ok && out.find("=> 60") != std::string::npos, "3 level nested closures");
 
-    // Nested function recursion
     std::string nestedRecCode =
         "task outer() {\n"
         "    task inner(int n) {\n"
@@ -522,7 +647,6 @@ static void testV050Features() {
     out = runCodeFresh(nestedRecCode, ok);
     TEST_ASSERT(ok && out.find("=> 0") != std::string::npos, "nested function recursion");
 
-    // 3. Prefix & Postfix Increment/Decrement
     out = runCodeFresh("let x = 5~ echo x++~ echo x~", ok);
     TEST_ASSERT(ok && out.find("=> 5") != std::string::npos && out.find("=> 6") != std::string::npos, "postfix ++ returns old value and increments");
 
@@ -535,11 +659,9 @@ static void testV050Features() {
     out = runCodeFresh("let x = 5~ echo --x~ echo x~", ok);
     TEST_ASSERT(ok && out.find("=> 4") != std::string::npos, "prefix -- returns new value and decrements");
 
-    // Float increment/decrement
     out = runCodeFresh("let float f = 2.5~ f++~ echo f~", ok);
     TEST_ASSERT(ok && out.find("=> 3.5") != std::string::npos, "float ++");
 
-    // Index increment/decrement (array and map)
     out = runCodeFresh("let arr = [10, 20]~ echo arr[0]++~ echo arr[0]~", ok);
     TEST_ASSERT(ok && out.find("=> 10") != std::string::npos && out.find("=> 11") != std::string::npos, "array element postfix ++");
 
@@ -549,15 +671,12 @@ static void testV050Features() {
     out = runCodeFresh("let m = {\"a\": 5}~ m[\"a\"]++~ echo m[\"a\"]~", ok);
     TEST_ASSERT(ok && out.find("=> 6") != std::string::npos, "map element postfix ++");
 
-    // Const increment error
     out = runCodeFresh("const int c = 10~ c++~", ok);
     TEST_ASSERT(!ok && out.find("Cannot reassign constant") != std::string::npos, "const increment compiler error");
 
-    // Invalid operand type for ++
     out = runCodeFresh("let s = \"hello\"~ s++~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("'++' operand must be a number") != std::string::npos, "non-numeric ++ runtime error");
 
-    // Integer overflow on ++
     out = runCodeFresh("let int maxVal = 9223372036854775807~ maxVal++~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "integer overflow ++ runtime error");
 }
@@ -566,10 +685,8 @@ static void testV052Modules() {
     bool ok = false;
     std::string out;
 
-    // Create temporary module test directory structure
     fs::create_directories("test_mods/lib");
 
-    // 1. math.kek
     {
         std::ofstream f("test_mods/math.kek");
         f << "echo \"math init\"~\n"
@@ -584,7 +701,6 @@ static void testV052Modules() {
         f.close();
     }
 
-    // 2. lib/num.kek
     {
         std::ofstream f("test_mods/lib/num.kek");
         f << "grab helper as h~\n"
@@ -593,14 +709,12 @@ static void testV052Modules() {
         f.close();
     }
 
-    // 3. lib/helper.kek
     {
         std::ofstream f("test_mods/lib/helper.kek");
         f << "pub let val = 42~\n";
         f.close();
     }
 
-    // 4. circ_a.kek and circ_b.kek
     {
         std::ofstream f1("test_mods/circ_a.kek");
         f1 << "grab circ_b~\n";
@@ -610,7 +724,6 @@ static void testV052Modules() {
         f2.close();
     }
 
-    // 5. mod_data.kek
     {
         std::ofstream f("test_mods/mod_data.kek");
         f << "pub let arr = [1, 2, 3]~\n"
@@ -619,7 +732,6 @@ static void testV052Modules() {
         f.close();
     }
 
-    // Test simple loading, member access, aliases, and single initialization caching
     std::string mainCode1 =
         "grab math~\n"
         "grab math as m~\n"
@@ -639,49 +751,39 @@ static void testV052Modules() {
     TEST_ASSERT(out.find("=> 9") != std::string::npos, "pub task call member access");
     TEST_ASSERT(out.find("=> 1") != std::string::npos, "aliased module shares state");
 
-    // Test private variable access rejection
     out = runCodeFresh("grab math~\n echo math.secret~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("secret' is private in module 'math'") != std::string::npos, "private variable access rejected");
 
-    // Test private task access rejection
     out = runCodeFresh("grab math~\n math.helper()~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("helper' is private in module 'math'") != std::string::npos, "private task access rejected");
 
-    // Test nonexistent member error
     out = runCodeFresh("grab math~\n echo math.unknown~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("[Member Error]") != std::string::npos && out.find("Member 'unknown' does not exist") != std::string::npos, "nonexistent member error");
 
-    // Test relative module loading (from lib/num.kek grabbing helper.kek)
     out = runCodeFresh("grab lib.num as n~\n echo n.five()~\n echo n.getValue()~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("=> 5") != std::string::npos && out.find("=> 42") != std::string::npos, "relative module dependency resolution");
 
-    // Test nested path import without alias (grab lib.num~)
     out = runCodeFresh("grab lib.num~\n echo lib.num.five()~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("=> 5") != std::string::npos, "nested path import without alias allows lib.num.five()");
 
-    // Test circular dependency detection
     out = runCodeFresh("grab circ_a~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("Circular module dependency detected") != std::string::npos && out.find("circ_a -> circ_b -> circ_a") != std::string::npos, "circular dependency detection");
 
-    // Test module alias immutability
     out = runCodeFresh("grab math as m~\n m = 123~\n", ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Cannot reassign module alias 'm'") != std::string::npos, "module alias immutability");
 
-    // Test 'pub'/'priv' forbidden on local variables, task parameters, local tasks
     out = runCodeFresh("task foo() { pub let x = 10~ }\n", ok);
     TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos, "pub on local variable rejected at compile time");
 
     out = runCodeFresh("task foo(pub int x) {}\n", ok);
     TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos, "pub on parameter rejected at compile time");
 
-    // Test 'grab' forbidden inside tasks, blocks, loops, conditionals
     out = runCodeFresh("task foo() { grab math~ }\n", ok);
     TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos && out.find("'grab' is allowed only at top-level module scope") != std::string::npos, "grab inside task rejected");
 
     out = runCodeFresh("if (true) { grab math~ }\n", ok);
     TEST_ASSERT(!ok && out.find("[Compiler Error]") != std::string::npos, "grab inside block/conditional rejected");
 
-    // Test public mutable arrays/maps mutation and pub const enforcement
     std::string dataCode =
         "grab mod_data as d~\n"
         "d.arr[0] = 99~\n"
@@ -692,17 +794,20 @@ static void testV052Modules() {
     out = runCodeFresh(dataCode, ok, "test_mods/main.kek");
     TEST_ASSERT(ok && out.find("=> 99") != std::string::npos && out.find("=> 100") != std::string::npos && out.find("Cannot reassign constant variable 'LIMIT'") != std::string::npos, "public mutable collections and pub const enforcement");
 
-    // Clean up temporary test files
     fs::remove_all("test_mods");
 }
 
 int main() {
-    std::cout << "Running Kekno v0.5.2 Regression Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.5.5 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
-    testCharAndStringUtilities();
-    testCasts();
+    testArrayMethods();
+    testMapMethods();
+    testHigherOrderCollectionOperations();
+    testNamedArguments();
+    testStringMethodsAndUnicode();
+    testRemovedLegacyAPIsAndCasts();
     testControlFlowForElseIfAndConst();
     testCompoundAssignments();
     testTypedDeclarationsAndParameters();

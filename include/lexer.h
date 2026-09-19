@@ -20,5 +20,6 @@ private:
 public:
     Lexer(std::string src);
     Token nextToken();
+    Token peekToken();
     std::string getLineString(int targetLine) const;
 };

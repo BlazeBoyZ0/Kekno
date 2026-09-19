@@ -201,18 +201,117 @@ int Compiler::addUpvalue(CompilerContext* context, uint16_t index, bool isLocal,
 }
 
 uint16_t Compiler::argumentList() {
-    uint16_t argCount = 0;
+    struct ArgInfo {
+        bool isNamed = false;
+        std::string name;
+        bool isSpread = false;
+    };
+    std::vector<ArgInfo> args;
+
+    int startOffset = static_cast<int>(chunk().code.size());
+    bool hasSpread = false;
+    bool seenNamed = false;
+    std::vector<std::string> namedArgNames;
+
     if (current.type != TokenType::RPAREN) {
         do {
-            expression();
-            if (argCount == 65535) {
+            ArgInfo info;
+            if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::EQUAL) {
+                info.isNamed = true;
+                info.name = current.text;
+                advance(); // consume identifier
+                advance(); // consume '='
+                seenNamed = true;
+                namedArgNames.push_back(info.name);
+            } else if (seenNamed) {
+                error("Positional arguments cannot follow named arguments.", "Syntax Error");
+            }
+
+            bool isSliceArg = false;
+            bool hasStart = false, hasEnd = false, hasStep = false;
+
+            if (current.type == TokenType::COLON) {
+                isSliceArg = true;
+                chunk().writeOp(OpCode::OP_NIL); // omitted start
+            } else {
+                expression();
+                hasStart = true;
+            }
+
+            if (match(TokenType::COLON)) {
+                isSliceArg = true;
+                if (current.type != TokenType::COLON && current.type != TokenType::COMMA && current.type != TokenType::RPAREN) {
+                    expression();
+                    hasEnd = true;
+                } else {
+                    chunk().writeOp(OpCode::OP_NIL); // omitted end
+                }
+
+                if (match(TokenType::COLON)) {
+                    if (current.type != TokenType::COMMA && current.type != TokenType::RPAREN) {
+                        expression();
+                        hasStep = true;
+                    } else {
+                        chunk().writeOp(OpCode::OP_NIL); // omitted step
+                    }
+                } else {
+                    chunk().writeOp(OpCode::OP_NIL); // omitted step
+                }
+            }
+
+            if (isSliceArg) {
+                chunk().writeOp(OpCode::OP_BUILD_SLICE);
+                uint8_t flags = (hasStart ? 1 : 0) | (hasEnd ? 2 : 0) | (hasStep ? 4 : 0);
+                chunk().writeByte(flags);
+            }
+
+            if (match(TokenType::DOT_DOT_DOT)) {
+                info.isSpread = true;
+                if (!hasSpread) {
+                    hasSpread = true;
+                    chunk().code.insert(chunk().code.begin() + startOffset, static_cast<uint8_t>(OpCode::OP_BEGIN_CALL));
+                }
+                chunk().writeOp(OpCode::OP_SPREAD_ARG);
+            }
+
+            args.push_back(info);
+            if (args.size() == 65535) {
                 error("Cannot have more than 65,535 arguments.", "Compiler Error");
             }
-            argCount++;
         } while (match(TokenType::COMMA));
     }
     consume(TokenType::RPAREN, "Expected ')' after arguments");
-    return argCount;
+
+    uint16_t totalArgCount = static_cast<uint16_t>(args.size());
+    uint16_t namedCount = static_cast<uint16_t>(namedArgNames.size());
+
+    if (!hasSpread) {
+        if (namedCount == 0) {
+            chunk().writeOp(OpCode::OP_CALL);
+            chunk().write16(totalArgCount);
+        } else {
+            chunk().writeOp(OpCode::OP_CALL_NAMED);
+            chunk().write16(totalArgCount);
+            chunk().write16(namedCount);
+            for (const auto& name : namedArgNames) {
+                uint16_t nameIdx = addConstant(Value(name));
+                chunk().write16(nameIdx);
+            }
+        }
+    } else {
+        if (namedCount == 0) {
+            chunk().writeOp(OpCode::OP_CALL_VAR);
+        } else {
+            chunk().writeOp(OpCode::OP_CALL_VAR_NAMED);
+            chunk().write16(namedCount);
+            for (const auto& name : namedArgNames) {
+                uint16_t nameIdx = addConstant(Value(name));
+                chunk().write16(nameIdx);
+            }
+        }
+    }
+
+    return totalArgCount;
 }
 
 TypeSpec Compiler::parseTypeDeclaration() {
@@ -328,6 +427,100 @@ void Compiler::primary() {
         consume(TokenType::RBRACE, "Expected '}' after map entries");
         chunk().writeOp(OpCode::OP_BUILD_MAP);
         chunk().write16(entryCount);
+    } else if (current.type == TokenType::TASK) {
+        advance(); // consume 'task'
+        std::string fnName = "";
+        if (current.type == TokenType::IDENTIFIER) {
+            fnName = current.text;
+            advance();
+        }
+
+        FunctionPtr fn = std::make_shared<ObjFunction>();
+        fn->name = fnName;
+
+        CompilerContext fnContext(fn->chunk);
+        fnContext.enclosing = currentContext;
+        fnContext.function = fn;
+        fnContext.type = FunctionType::TYPE_FUNCTION;
+        fnContext.scopeDepth = 1;
+
+        Local slot0;
+        slot0.name = "";
+        slot0.depth = 0;
+        fnContext.locals.push_back(slot0);
+
+        CompilerContext* parentContext = currentContext;
+        Loop* enclosingLoop = currentLoop;
+
+        {
+            currentContext = &fnContext;
+            currentLoop = nullptr;
+
+            struct TaskScopeGuard {
+                CompilerContext** ctxPtr;
+                CompilerContext* parentCtx;
+                Loop** loopPtr;
+                Loop* parentLoop;
+                TaskScopeGuard(CompilerContext** cP, CompilerContext* pC, Loop** lP, Loop* pL)
+                    : ctxPtr(cP), parentCtx(pC), loopPtr(lP), parentLoop(pL) {}
+                ~TaskScopeGuard() {
+                    *ctxPtr = parentCtx;
+                    *loopPtr = parentLoop;
+                }
+            } taskGuard(&currentContext, parentContext, &currentLoop, enclosingLoop);
+
+            consume(TokenType::LPAREN, "Expected '(' after 'task'");
+            if (current.type != TokenType::RPAREN) {
+                do {
+                    fn->arity++;
+                    if (fn->arity > 65535) {
+                        error("Cannot have more than 65,535 parameters.", "Compiler Error");
+                    }
+                    if (current.type == TokenType::PUB || current.type == TokenType::PRIV) {
+                        error("Visibility modifiers ('pub'/'priv') are not allowed on task parameters.", "Compiler Error");
+                    }
+                    TypeSpec pSpec;
+                    if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
+                        current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
+                        current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
+                        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
+                        pSpec = parseTypeDeclaration();
+                    }
+                    fn->paramTypes.push_back(pSpec);
+
+                    if (current.type != TokenType::IDENTIFIER) {
+                        errorAt(current, "Expected parameter name", "Syntax Error");
+                    } else {
+                        fn->paramNames.push_back(current.text);
+                        addLocal(current.text, false, pSpec);
+                        advance();
+                    }
+                } while (match(TokenType::COMMA));
+            }
+            consume(TokenType::RPAREN, "Expected ')' after parameters");
+            consume(TokenType::LBRACE, "Expected '{' before task body");
+
+            while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                statement();
+            }
+            consume(TokenType::RBRACE, "Expected '}' after task body");
+
+            chunk().writeOp(OpCode::OP_NIL);
+            chunk().writeOp(OpCode::OP_RETURN);
+
+            fn->localTypes = fn->chunk.localTypes;
+        }
+
+        if (hasError) return;
+
+        uint16_t fnConstantIdx = addConstant(Value(fn));
+        chunk().writeOp(OpCode::OP_CLOSURE);
+        chunk().write16(fnConstantIdx);
+
+        for (size_t i = 0; i < fnContext.upvalues.size(); i++) {
+            chunk().writeByte(fnContext.upvalues[i].isLocal ? 1 : 0);
+            chunk().write16(fnContext.upvalues[i].index);
+        }
     } else {
         errorAt(current, "Expected expression", "Syntax Error");
     }
@@ -337,15 +530,60 @@ void Compiler::postfix() {
     primary();
     while (!hasError) {
         if (match(TokenType::LPAREN)) {
-            uint16_t argCount = argumentList();
-            chunk().writeOp(OpCode::OP_CALL);
-            chunk().write16(argCount);
+            argumentList();
         } else if (match(TokenType::LBRACKET)) {
-            expression();
-            consume(TokenType::RBRACKET, "Expected ']' after index");
+            bool isSlice = false;
+            bool hasStart = false;
+            bool hasEnd = false;
+            bool hasStep = false;
+
+            if (current.type == TokenType::COLON) {
+                isSlice = true;
+                chunk().writeOp(OpCode::OP_NIL); // omitted start
+            } else {
+                expression();
+                hasStart = true;
+            }
+
+            if (match(TokenType::COLON)) {
+                isSlice = true;
+                if (current.type != TokenType::COLON && current.type != TokenType::RBRACKET) {
+                    expression();
+                    hasEnd = true;
+                } else {
+                    chunk().writeOp(OpCode::OP_NIL); // omitted end
+                }
+
+                if (match(TokenType::COLON)) {
+                    if (current.type != TokenType::RBRACKET) {
+                        expression();
+                        hasStep = true;
+                    } else {
+                        chunk().writeOp(OpCode::OP_NIL); // omitted step
+                    }
+                } else {
+                    chunk().writeOp(OpCode::OP_NIL); // omitted step
+                }
+            }
+
+            consume(TokenType::RBRACKET, "Expected ']' after index or slice");
+
+            if (isSlice) {
+                chunk().writeOp(OpCode::OP_BUILD_SLICE);
+                uint8_t flags = (hasStart ? 1 : 0) | (hasEnd ? 2 : 0) | (hasStep ? 4 : 0);
+                chunk().writeByte(flags);
+            }
             chunk().writeOp(OpCode::OP_GET_INDEX);
         } else if (match(TokenType::DOT)) {
-            if (current.type != TokenType::IDENTIFIER) {
+            if (current.type != TokenType::IDENTIFIER &&
+                current.type != TokenType::TYPE_INT &&
+                current.type != TokenType::TYPE_FLOAT &&
+                current.type != TokenType::TYPE_STRING &&
+                current.type != TokenType::TYPE_BOOL &&
+                current.type != TokenType::TYPE_CHAR &&
+                current.type != TokenType::TYPE_ARRAY &&
+                current.type != TokenType::TYPE_MAP &&
+                current.type != TokenType::TYPE_FUNC) {
                 errorAt(current, "Expected member name after '.'.", "Syntax Error");
                 return;
             }
@@ -721,6 +959,7 @@ void Compiler::taskDeclaration(bool isPublic) {
                 if (current.type != TokenType::IDENTIFIER) {
                     errorAt(current, "Expected parameter name", "Syntax Error");
                 } else {
+                    fn->paramNames.push_back(current.text);
                     addLocal(current.text, false, pSpec);
                     advance();
                 }
