@@ -58,6 +58,8 @@ private:
     std::unordered_map<std::string, bool> globalConsts;
     bool hasError = false;
     bool panicMode = false;
+    int expressionDepth = 0;
+    static constexpr int MAX_EXPRESSION_DEPTH = 300;
 
     Chunk& chunk() { return currentContext->chunk; }
 

@@ -33,6 +33,7 @@ private:
     UpvaluePtr captureUpvalue(size_t stackIndex);
     void closeUpvalues(size_t lastSlotIndex);
     ModulePtr loadModule(const std::string& modulePathStr, const std::string& requesterPath, ClosurePtr& outClosure, bool& isNew);
+    void runtimeError(const std::string& message);
 
 public:
     VM();

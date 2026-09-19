@@ -3,6 +3,7 @@
 
 Compiler::Compiler(const std::string& src, Chunk& targetChunk)
     : lexer(src), targetChunk(targetChunk) {
+    targetChunk.source = src;
     advance();
 }
 
@@ -72,9 +73,9 @@ uint16_t Compiler::addConstant(Value value) {
 }
 
 void Compiler::emitConstant(Value value) {
-    chunk().writeOp(OpCode::OP_CONSTANT);
+    chunk().writeOp(OpCode::OP_CONSTANT, prev.line, prev.column);
     uint16_t idx = addConstant(value);
-    chunk().write16(idx);
+    chunk().write16(idx, prev.line, prev.column);
 }
 
 int Compiler::emitJump(OpCode op) {
@@ -834,7 +835,14 @@ void Compiler::orExpression() {
 
 void Compiler::expression() {
     if (hasError) return;
+    expressionDepth++;
+    if (expressionDepth > MAX_EXPRESSION_DEPTH) {
+        error("Expression nesting limit exceeded.", "Compiler Error");
+        expressionDepth--;
+        return;
+    }
     orExpression();
+    expressionDepth--;
 }
 
 void Compiler::varDeclaration(bool isPublic) {
