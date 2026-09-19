@@ -88,15 +88,29 @@ static std::string utf8_trim(const std::string& str) {
 }
 
 static std::string utf8_upper(const std::string& str) {
-    std::string s = str;
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
-    return s;
+    std::vector<std::string> chars = utf8_to_chars(str);
+    std::string res = "";
+    for (const auto& c : chars) {
+        if (c.length() == 1) {
+            res += static_cast<char>(std::toupper(static_cast<unsigned char>(c[0])));
+        } else {
+            res += c;
+        }
+    }
+    return res;
 }
 
 static std::string utf8_lower(const std::string& str) {
-    std::string s = str;
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-    return s;
+    std::vector<std::string> chars = utf8_to_chars(str);
+    std::string res = "";
+    for (const auto& c : chars) {
+        if (c.length() == 1) {
+            res += static_cast<char>(std::tolower(static_cast<unsigned char>(c[0])));
+        } else {
+            res += c;
+        }
+    }
+    return res;
 }
 
 struct ArgMap {
@@ -109,37 +123,51 @@ struct ArgMap {
 };
 
 static ArgMap parseCallArgs(int argCount, Value* args, const std::vector<std::string>& argNames,
-                            const std::vector<std::string>& paramNames, const std::string& fnName) {
+                            const std::vector<std::vector<std::string>>& paramSpecs, const std::string& fnName) {
     int namedCount = static_cast<int>(argNames.size());
     int posCount = argCount - namedCount;
     if (posCount < 0) throw std::runtime_error("[Runtime Error]: Invalid argument count for " + fnName + ".");
 
-    ArgMap result;
-    std::unordered_map<std::string, bool> provided;
-
-    for (int i = 0; i < posCount; ++i) {
-        if (i >= static_cast<int>(paramNames.size())) {
-            throw std::runtime_error("[Runtime Error]: Too many arguments provided for " + fnName + ".");
-        }
-        std::string pName = paramNames[i];
-        result.map[pName] = args[i];
-        provided[pName] = true;
+    if (posCount > static_cast<int>(paramSpecs.size())) {
+        throw std::runtime_error("[Runtime Error]: Too many arguments provided for " + fnName + ".");
     }
 
-    for (int i = 0; i < namedCount; ++i) {
-        std::string name = argNames[i];
-        bool validParam = false;
-        for (const auto& p : paramNames) {
-            if (p == name) { validParam = true; break; }
+    ArgMap result;
+    std::vector<bool> slotProvided(paramSpecs.size(), false);
+
+    for (int i = 0; i < posCount; ++i) {
+        slotProvided[i] = true;
+        for (const auto& name : paramSpecs[i]) {
+            result.map[name] = args[i];
         }
-        if (!validParam) {
+    }
+
+    for (int k = 0; k < namedCount; ++k) {
+        std::string name = argNames[k];
+        int matchedSlot = -1;
+        for (size_t s = 0; s < paramSpecs.size(); ++s) {
+            for (const auto& alias : paramSpecs[s]) {
+                if (alias == name) {
+                    matchedSlot = static_cast<int>(s);
+                    break;
+                }
+            }
+            if (matchedSlot != -1) break;
+        }
+
+        if (matchedSlot == -1) {
             throw std::runtime_error("[Runtime Error]: Unexpected argument name '" + name + "' for " + fnName + ".");
         }
-        if (provided[name]) {
+
+        if (slotProvided[matchedSlot]) {
             throw std::runtime_error("[Runtime Error]: Duplicate argument '" + name + "' provided for " + fnName + ".");
         }
-        result.map[name] = args[posCount + i];
-        provided[name] = true;
+
+        slotProvided[matchedSlot] = true;
+        Value val = args[posCount + k];
+        for (const auto& alias : paramSpecs[matchedSlot]) {
+            result.map[alias] = val;
+        }
     }
 
     return result;
@@ -552,12 +580,16 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     if (expected.kind == TypeKind::MAP) {
         if (!val.isMap()) return false;
         if (!val.map) return true;
-        TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind != TypeKind::ANY ? expected.keyKind : TypeKind::STRING};
+        TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind};
         TypeSpec valSpec = expected.valType ? *expected.valType : TypeSpec{expected.valueKind};
         for (auto& pair : val.map->table) {
             Value kVal = pair.first.val;
-            if (!checkAndCoerceValueType(keySpec, kVal)) return false;
-            if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
+            if (keySpec.kind != TypeKind::ANY && keySpec.kind != TypeKind::UNTYPED) {
+                if (!checkAndCoerceValueType(keySpec, kVal)) return false;
+            }
+            if (valSpec.kind != TypeKind::ANY && valSpec.kind != TypeKind::UNTYPED) {
+                if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
+            }
         }
         val.map->typeSpec = expected;
         return true;
@@ -669,79 +701,87 @@ ModulePtr VM::loadModule(const std::string& modulePathStr, const std::string& re
 }
 
 VM::VM() {
-    auto auto_args = [](auto fn) {
-        return [fn](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-            (void)argNames;
-            return fn(argCount, args);
-        };
-    };
-
-    builtins["size"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: size() expects 1 argument.");
-        if (args[0].isArray()) {
-            return Value(static_cast<int64_t>(args[0].array ? args[0].array->size() : 0));
-        } else if (args[0].isString()) {
-            return Value(static_cast<int64_t>(utf8_length(args[0].str)));
-        } else if (args[0].isMap()) {
-            return Value(static_cast<int64_t>(args[0].map ? args[0].map->keys.size() : 0));
+    builtins["size"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "coll"}}, "size()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: size() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isArray()) {
+            return Value(static_cast<int64_t>(val.array ? val.array->size() : 0));
+        } else if (val.isString()) {
+            return Value(static_cast<int64_t>(utf8_length(val.str)));
+        } else if (val.isMap()) {
+            return Value(static_cast<int64_t>(val.map ? val.map->keys.size() : 0));
         }
         throw std::runtime_error("[Runtime Error]: size() expects array, map, or string argument.");
-    })));
+    }));
 
-    builtins["keys"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: keys() expects 1 argument.");
-        if (!args[0].isMap() || !args[0].map) {
+    builtins["keys"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"map"}}, "keys()");
+        if (!aMap.has("map")) throw std::runtime_error("[Runtime Error]: keys() expects map as argument.");
+        Value mapVal = aMap.get("map");
+        if (!mapVal.isMap() || !mapVal.map) {
             throw std::runtime_error("[Runtime Error]: keys() expects map as argument.");
         }
         ArrayPtr arr = std::make_shared<ObjArray>();
-        for (const Value& key : args[0].map->keys) {
+        for (const Value& key : mapVal.map->keys) {
             arr->push_back(key);
         }
         return Value(arr);
-    })));
+    }));
 
-    builtins["values"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: values() expects 1 argument.");
-        if (!args[0].isMap() || !args[0].map) {
+    builtins["values"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"map"}}, "values()");
+        if (!aMap.has("map")) throw std::runtime_error("[Runtime Error]: values() expects map as argument.");
+        Value mapVal = aMap.get("map");
+        if (!mapVal.isMap() || !mapVal.map) {
             throw std::runtime_error("[Runtime Error]: values() expects map as argument.");
         }
         ArrayPtr arr = std::make_shared<ObjArray>();
-        for (const Value& key : args[0].map->keys) {
-            arr->push_back(args[0].map->get(key));
+        for (const Value& key : mapVal.map->keys) {
+            arr->push_back(mapVal.map->get(key));
         }
         return Value(arr);
-    })));
+    }));
 
-    builtins["has"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 2) throw std::runtime_error("[Runtime Error]: has() expects 2 arguments.");
-        if (args[0].isMap()) {
-            if (!ObjMap::isSupportedKey(args[1])) {
+    builtins["has"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"coll", "map", "array"}, {"key", "val"}}, "has()");
+        if (!aMap.has("coll") || !aMap.has("key")) {
+            throw std::runtime_error("[Runtime Error]: has() expects 2 arguments.");
+        }
+        Value coll = aMap.get("coll");
+        Value key = aMap.get("key");
+        if (coll.isMap()) {
+            if (!ObjMap::isSupportedKey(key)) {
                 throw std::runtime_error("[Runtime Error]: unsupported map key in has().");
             }
-            if (!args[0].map) return Value(false);
-            return Value(args[0].map->contains(args[1]));
-        } else if (args[0].isArray()) {
-            if (!args[0].array) return Value(false);
-            for (const Value& elem : *args[0].array) {
-                if (elem.isEqual(args[1])) return Value(true);
+            if (!coll.map) return Value(false);
+            return Value(coll.map->contains(key));
+        } else if (coll.isArray()) {
+            if (!coll.array) return Value(false);
+            for (const Value& elem : *coll.array) {
+                if (elem.isEqual(key)) return Value(true);
             }
             return Value(false);
         }
         throw std::runtime_error("[Runtime Error]: has() expects map or array as first argument.");
-    })));
+    }));
 
-    builtins["read"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: read() expects 1 argument.");
-        std::cout << args[0].toString();
+    builtins["read"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"prompt"}}, "read()");
+        if (!aMap.has("prompt")) throw std::runtime_error("[Runtime Error]: read() expects 1 argument.");
+        Value promptVal = aMap.get("prompt");
+        std::cout << promptVal.toString();
         std::cout.flush();
         std::string input;
         std::getline(std::cin, input);
         return Value(input);
-    })));
+    }));
 
-    builtins["scan"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: scan() expects 1 argument.");
-        switch (args[0].type) {
+    builtins["scan"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "scan()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: scan() expects 1 argument.");
+        Value val = aMap.get("val");
+        switch (val.type) {
             case ValueType::INT: return Value(std::string("int"));
             case ValueType::FLOAT: return Value(std::string("float"));
             case ValueType::CHAR: return Value(std::string("char"));
@@ -756,14 +796,16 @@ VM::VM() {
             case ValueType::SLICE: return Value(std::string("slice"));
         }
         return Value(std::string("nil"));
-    })));
+    }));
 
     // Explicit Type Casts
-    builtins["cast_int"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_int() expects 1 argument.");
-        if (args[0].isInt()) return args[0];
-        if (args[0].isFloat()) {
-            double f = args[0].floatVal;
+    builtins["cast_int"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "cast_int()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: cast_int() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isInt()) return val;
+        if (val.isFloat()) {
+            double f = val.floatVal;
             if (std::isnan(f) || std::isinf(f)) {
                 throw std::runtime_error("[Runtime Error]: Cannot cast NaN or Infinity to int.");
             }
@@ -773,44 +815,50 @@ VM::VM() {
             }
             return Value(static_cast<int64_t>(rounded));
         }
-        if (args[0].isBool()) return Value(static_cast<int64_t>(args[0].boolean ? 1 : 0));
-        if (args[0].isString()) {
+        if (val.isBool()) return Value(static_cast<int64_t>(val.boolean ? 1 : 0));
+        if (val.isString()) {
             try {
                 size_t pos = 0;
-                int64_t val = std::stoll(args[0].str, &pos, 10);
-                if (pos == args[0].str.length()) return Value(val);
+                int64_t v = std::stoll(val.str, &pos, 10);
+                if (pos == val.str.length()) return Value(v);
             } catch (...) {}
-            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + args[0].str + "' to int.");
+            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + val.str + "' to int.");
         }
         throw std::runtime_error("[Runtime Error]: Invalid conversion to int.");
-    })));
+    }));
 
-    builtins["cast_float"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_float() expects 1 argument.");
-        if (args[0].isFloat()) return args[0];
-        if (args[0].isInt()) return Value(static_cast<double>(args[0].intVal));
-        if (args[0].isBool()) return Value(args[0].boolean ? 1.0 : 0.0);
-        if (args[0].isString()) {
+    builtins["cast_float"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "cast_float()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: cast_float() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isFloat()) return val;
+        if (val.isInt()) return Value(static_cast<double>(val.intVal));
+        if (val.isBool()) return Value(val.boolean ? 1.0 : 0.0);
+        if (val.isString()) {
             try {
                 size_t pos = 0;
-                double val = std::stod(args[0].str, &pos);
-                if (pos == args[0].str.length()) return Value(val);
+                double v = std::stod(val.str, &pos);
+                if (pos == val.str.length()) return Value(v);
             } catch (...) {}
-            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + args[0].str + "' to float.");
+            throw std::runtime_error("[Runtime Error]: Cannot cast string '" + val.str + "' to float.");
         }
         throw std::runtime_error("[Runtime Error]: Invalid conversion to float.");
-    })));
+    }));
 
-    builtins["cast_string"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_string() expects 1 argument.");
-        return Value(args[0].toString());
-    })));
+    builtins["cast_string"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "cast_string()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: cast_string() expects 1 argument.");
+        Value val = aMap.get("val");
+        return Value(val.toString());
+    }));
 
-    builtins["cast_char"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_char() expects 1 argument.");
-        if (args[0].isChar()) return args[0];
-        if (args[0].isString()) {
-            std::string s = args[0].str;
+    builtins["cast_char"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "cast_char()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: cast_char() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isChar()) return val;
+        if (val.isString()) {
+            std::string s = val.str;
             std::vector<std::string> chars = utf8_to_chars(s);
             if (chars.size() != 1) {
                 throw std::runtime_error("[Runtime Error]: cast_char() requires a single-character string.");
@@ -818,92 +866,110 @@ VM::VM() {
             return Value(utf8_code_point(chars[0]), true);
         }
         throw std::runtime_error("[Runtime Error]: cast_char() requires an actual single-character value.");
-    })));
+    }));
 
-    builtins["cast_array"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_array() expects 1 argument.");
-        if (args[0].isArray()) return args[0];
-        if (args[0].isString()) {
+    builtins["cast_array"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "cast_array()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: cast_array() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isArray()) return val;
+        if (val.isString()) {
             ArrayPtr arr = std::make_shared<ObjArray>();
-            for (const auto& cStr : utf8_to_chars(args[0].str)) {
+            for (const auto& cStr : utf8_to_chars(val.str)) {
                 arr->push_back(Value(utf8_code_point(cStr), true));
             }
             return Value(arr);
         }
         throw std::runtime_error("[Runtime Error]: Cannot cast value to array.");
-    })));
+    }));
 
-    builtins["cast_map"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: cast_map() expects 1 argument.");
-        if (args[0].isMap()) return args[0];
+    builtins["cast_map"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "cast_map()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: cast_map() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isMap()) return val;
         throw std::runtime_error("[Runtime Error]: Cannot cast value to map.");
-    })));
+    }));
 
     // Math Functions
-    builtins["clock"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
+    builtins["clock"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
         (void)args;
-        if (argCount != 0) throw std::runtime_error("[Runtime Error]: clock() expects 0 arguments.");
+        parseCallArgs(argCount, args, argNames, {}, "clock()");
         auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
         double seconds = std::chrono::duration<double>(now).count();
         return Value(seconds);
-    })));
+    }));
 
-    builtins["rand"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
+    builtins["rand"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
         (void)args;
-        if (argCount != 0) throw std::runtime_error("[Runtime Error]: rand() expects 0 arguments.");
+        parseCallArgs(argCount, args, argNames, {}, "rand()");
         static std::mt19937 rng(std::random_device{}());
         static std::uniform_real_distribution<double> dist(0.0, 1.0);
         return Value(dist(rng));
-    })));
+    }));
 
-    builtins["abs"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: abs() expects 1 argument.");
-        if (args[0].isInt()) return Value(std::abs(args[0].intVal));
-        if (args[0].isFloat()) return Value(std::abs(args[0].floatVal));
+    builtins["abs"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x"}}, "abs()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: abs() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isInt()) return Value(std::abs(val.intVal));
+        if (val.isFloat()) return Value(std::abs(val.floatVal));
         throw std::runtime_error("[Runtime Error]: abs() expects a number.");
-    })));
+    }));
 
-    builtins["floor"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: floor() expects 1 argument.");
-        if (args[0].isInt()) return args[0];
-        if (args[0].isFloat()) return Value(std::floor(args[0].floatVal));
+    builtins["floor"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x"}}, "floor()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: floor() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isInt()) return val;
+        if (val.isFloat()) return Value(std::floor(val.floatVal));
         throw std::runtime_error("[Runtime Error]: floor() expects a number.");
-    })));
+    }));
 
-    builtins["ceil"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: ceil() expects 1 argument.");
-        if (args[0].isInt()) return args[0];
-        if (args[0].isFloat()) return Value(std::ceil(args[0].floatVal));
+    builtins["ceil"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x"}}, "ceil()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: ceil() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (val.isInt()) return val;
+        if (val.isFloat()) return Value(std::ceil(val.floatVal));
         throw std::runtime_error("[Runtime Error]: ceil() expects a number.");
-    })));
+    }));
 
-    builtins["sqrt"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 1) throw std::runtime_error("[Runtime Error]: sqrt() expects 1 argument.");
-        if (!args[0].isNumber()) throw std::runtime_error("[Runtime Error]: sqrt() expects a number.");
-        double val = args[0].asFloat();
-        if (val < 0.0) throw std::runtime_error("[Runtime Error]: Cannot calculate square root of negative number.");
-        return Value(std::sqrt(val));
-    })));
+    builtins["sqrt"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x"}}, "sqrt()");
+        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: sqrt() expects 1 argument.");
+        Value val = aMap.get("val");
+        if (!val.isNumber()) throw std::runtime_error("[Runtime Error]: sqrt() expects a number.");
+        double f = val.asFloat();
+        if (f < 0.0) throw std::runtime_error("[Runtime Error]: Cannot calculate square root of negative number.");
+        return Value(std::sqrt(f));
+    }));
 
-    builtins["clamp"] = Value(NativeFn(auto_args([](int argCount, Value* args) -> Value {
-        if (argCount != 3) throw std::runtime_error("[Runtime Error]: clamp() expects 3 arguments.");
-        if (!args[0].isNumber() || !args[1].isNumber() || !args[2].isNumber()) {
+    builtins["clamp"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
+        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x"}, {"min"}, {"max"}}, "clamp()");
+        if (!aMap.has("val") || !aMap.has("min") || !aMap.has("max")) {
+            throw std::runtime_error("[Runtime Error]: clamp() expects 3 arguments.");
+        }
+        Value vVal = aMap.get("val");
+        Value minVal = aMap.get("min");
+        Value maxVal = aMap.get("max");
+        if (!vVal.isNumber() || !minVal.isNumber() || !maxVal.isNumber()) {
             throw std::runtime_error("[Runtime Error]: clamp() expects numbers.");
         }
-        if (args[1].asFloat() > args[2].asFloat()) {
+        if (minVal.asFloat() > maxVal.asFloat()) {
             throw std::runtime_error("[Runtime Error]: clamp() min value cannot be greater than max value.");
         }
-        if (args[0].isInt() && args[1].isInt() && args[2].isInt()) {
-            int64_t val = args[0].intVal;
-            int64_t minVal = args[1].intVal;
-            int64_t maxVal = args[2].intVal;
-            return Value(std::max(minVal, std::min(val, maxVal)));
+        if (vVal.isInt() && minVal.isInt() && maxVal.isInt()) {
+            int64_t v = vVal.intVal;
+            int64_t mn = minVal.intVal;
+            int64_t mx = maxVal.intVal;
+            return Value(std::max(mn, std::min(v, mx)));
         }
-        double val = args[0].asFloat();
-        double minVal = args[1].asFloat();
-        double maxVal = args[2].asFloat();
-        return Value(std::max(minVal, std::min(val, maxVal)));
-    })));
+        double v = vVal.asFloat();
+        double mn = minVal.asFloat();
+        double mx = maxVal.asFloat();
+        return Value(std::max(mn, std::min(v, mx)));
+    }));
 }
 
 bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
@@ -1318,10 +1384,23 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     push(Value(static_cast<int64_t>(arr ? arr->size() : 0)));
                 } else if (memberName == "push") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
                         if (!arr) throw std::runtime_error("[Runtime Error]: Invalid array target.");
-                        for (int i = 0; i < argCount; ++i) {
-                            Value val = args[i];
+                        if (argNames.empty()) {
+                            if (argCount < 1) throw std::runtime_error("[Runtime Error]: push() expects at least 1 argument.");
+                            for (int i = 0; i < argCount; ++i) {
+                                Value val = args[i];
+                                if (arr->typeSpec.elementKind != TypeKind::ANY && arr->typeSpec.elementKind != TypeKind::UNTYPED) {
+                                    TypeSpec expectedElemSpec = arr->typeSpec.elemType ? *arr->typeSpec.elemType : TypeSpec{arr->typeSpec.elementKind};
+                                    if (!checkAndCoerceValueType(expectedElemSpec, val)) {
+                                        throw std::runtime_error("[Runtime Error]: Array push type mismatch.");
+                                    }
+                                }
+                                arr->push_back(val);
+                            }
+                        } else {
+                            ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val"}}, "push()");
+                            if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: push() expects at least 1 argument.");
+                            Value val = aMap.get("val");
                             if (arr->typeSpec.elementKind != TypeKind::ANY && arr->typeSpec.elementKind != TypeKind::UNTYPED) {
                                 TypeSpec expectedElemSpec = arr->typeSpec.elemType ? *arr->typeSpec.elemType : TypeSpec{arr->typeSpec.elementKind};
                                 if (!checkAndCoerceValueType(expectedElemSpec, val)) {
@@ -1335,7 +1414,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 } else if (memberName == "pop") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
                         if (!arr || arr->empty()) throw std::runtime_error("[Runtime Error]: Cannot pop from empty array.");
-                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {"ind"}, "pop()");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"ind"}}, "pop()");
                         int64_t idx = arr->size() - 1;
                         if (aMap.has("ind")) {
                             Value indVal = aMap.get("ind");
@@ -1353,7 +1432,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 } else if (memberName == "insert") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
                         if (!arr) throw std::runtime_error("[Runtime Error]: Invalid array target.");
-                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {"ind", "val"}, "insert()");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"ind"}, {"val"}}, "insert()");
                         if (!aMap.has("ind") || !aMap.has("val")) {
                             throw std::runtime_error("[Runtime Error]: insert() requires 'ind' and 'val' arguments.");
                         }
@@ -1384,30 +1463,16 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 } else if (memberName == "remove") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
                         if (!arr) throw std::runtime_error("[Runtime Error]: Invalid array target.");
-                        bool hasInd = false, hasVal = false;
-                        Value indVal, valVal;
-
-                        if (!argNames.empty()) {
-                            for (size_t i = 0; i < argNames.size(); ++i) {
-                                if (argNames[i] == "ind") { hasInd = true; indVal = args[argCount - argNames.size() + i]; }
-                                else if (argNames[i] == "val") { hasVal = true; valVal = args[argCount - argNames.size() + i]; }
-                                else throw std::runtime_error("[Runtime Error]: Unexpected argument '" + argNames[i] + "' for remove().");
-                            }
-                            if (argCount > static_cast<int>(argNames.size())) {
-                                int posCount = argCount - static_cast<int>(argNames.size());
-                                if (posCount == 1 && !hasInd && !hasVal) {
-                                    hasInd = true; indVal = args[0];
-                                }
-                            }
-                        } else if (argCount == 1) {
-                            hasInd = true; indVal = args[0];
-                        }
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"ind"}, {"val"}}, "remove()");
+                        bool hasInd = aMap.has("ind");
+                        bool hasVal = aMap.has("val");
 
                         if ((hasInd && hasVal) || (!hasInd && !hasVal)) {
                             throw std::runtime_error("[Runtime Error]: remove() expects either 'ind' or 'val', not both.");
                         }
 
                         if (hasInd) {
+                            Value indVal = aMap.get("ind");
                             if (!indVal.isInt()) throw std::runtime_error("[Runtime Error]: remove() ind must be an integer.");
                             int64_t len = static_cast<int64_t>(arr->size());
                             int64_t idx = indVal.intVal;
@@ -1419,6 +1484,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                             arr->erase(arr->begin() + idx);
                             return removed;
                         } else {
+                            Value valVal = aMap.get("val");
                             for (auto it = arr->elements.begin(); it != arr->elements.end(); ++it) {
                                 if (it->isEqual(valVal)) {
                                     arr->erase(it);
@@ -1430,28 +1496,30 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "contains") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: contains() expects 1 argument.");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "item", "element"}}, "contains()");
+                        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: contains() expects 1 argument.");
+                        Value searchVal = aMap.get("val");
                         if (!arr) return Value(false);
                         for (const Value& elem : arr->elements) {
-                            if (elem.isEqual(args[0])) return Value(true);
+                            if (elem.isEqual(searchVal)) return Value(true);
                         }
                         return Value(false);
                     })));
                 } else if (memberName == "index_of") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: index_of() expects 1 argument.");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "item", "element"}}, "index_of()");
+                        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: index_of() expects 1 argument.");
+                        Value searchVal = aMap.get("val");
                         if (!arr) return Value();
                         for (size_t i = 0; i < arr->size(); ++i) {
-                            if ((*arr)[i].isEqual(args[0])) return Value(static_cast<int64_t>(i));
+                            if ((*arr)[i].isEqual(searchVal)) return Value(static_cast<int64_t>(i));
                         }
                         return Value(); // nil
                     })));
                 } else if (memberName == "reverse") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: reverse() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "reverse()");
                         if (arr) {
                             arr->checkLock();
                             std::reverse(arr->elements.begin(), arr->elements.end());
@@ -1460,8 +1528,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "sort") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: sort() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "sort()");
                         if (arr) {
                             arr->checkLock();
                             std::stable_sort(arr->elements.begin(), arr->elements.end(), [](const Value& a, const Value& b) {
@@ -1476,7 +1544,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "slice") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {"start", "end", "step"}, "slice()");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"start"}, {"end"}, {"step"}}, "slice()");
                         SlicePtr slice = std::make_shared<ObjSlice>();
                         slice->start = aMap.get("start"); slice->hasStart = aMap.has("start");
                         slice->end = aMap.get("end"); slice->hasEnd = aMap.has("end");
@@ -1485,8 +1553,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "clear") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: clear() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "clear()");
                         if (arr) {
                             arr->checkLock();
                             arr->elements.clear();
@@ -1495,8 +1563,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "join") {
                     push(Value(NativeFn([arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {"separator"}, "join()");
-                        std::string delim = aMap.has("separator") ? aMap.get("separator").toString() : (argCount > 0 ? args[0].toString() : "");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"separator", "sep", "delim"}}, "join()");
+                        std::string delim = aMap.has("separator") ? aMap.get("separator").toString() : "";
                         if (!arr || arr->empty()) return Value(std::string(""));
                         std::string result = "";
                         for (size_t i = 0; i < arr->size(); ++i) {
@@ -1507,9 +1575,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "map") {
                     push(Value(NativeFn([this, arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: map() expects 1 callback argument.");
-                        Value cb = args[0];
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"fn", "cb", "callback"}}, "map()");
+                        if (!aMap.has("fn")) throw std::runtime_error("[Runtime Error]: map() expects 1 callback argument.");
+                        Value cb = aMap.get("fn");
                         if (!arr) return Value(std::make_shared<ObjArray>());
 
                         arr->lockCount++;
@@ -1518,6 +1586,14 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                         try {
                             for (size_t i = 0; i < arr->size(); ++i) {
                                 Value res = runCallback(cb, {(*arr)[i], Value(static_cast<int64_t>(i)), Value(arr)}, 3);
+                                if (arr->typeSpec.elementKind != TypeKind::ANY && arr->typeSpec.elementKind != TypeKind::UNTYPED) {
+                                    TypeSpec elemSpec = arr->typeSpec.elemType ? *arr->typeSpec.elemType : TypeSpec{arr->typeSpec.elementKind};
+                                    if (!checkAndCoerceValueType(elemSpec, res)) {
+                                        throw std::runtime_error("[Runtime Error]: Callback returned value of type " +
+                                                                 res.getTypeSpec().toString() + " incompatible with array element type " +
+                                                                 elemSpec.toString() + ".");
+                                    }
+                                }
                                 result->push_back(res);
                             }
                         } catch (...) {
@@ -1529,9 +1605,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "filter") {
                     push(Value(NativeFn([this, arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: filter() expects 1 callback argument.");
-                        Value cb = args[0];
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"fn", "cb", "callback"}}, "filter()");
+                        if (!aMap.has("fn")) throw std::runtime_error("[Runtime Error]: filter() expects 1 callback argument.");
+                        Value cb = aMap.get("fn");
                         if (!arr) return Value(std::make_shared<ObjArray>());
 
                         arr->lockCount++;
@@ -1553,11 +1629,11 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "reduce") {
                     push(Value(NativeFn([this, arr](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount < 1 || argCount > 2) throw std::runtime_error("[Runtime Error]: reduce() expects 1 callback and optional initial value.");
-                        Value cb = args[0];
-                        bool hasInitial = (argCount == 2);
-                        Value acc = hasInitial ? args[1] : Value();
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"fn", "cb", "callback"}, {"initial", "acc"}}, "reduce()");
+                        if (!aMap.has("fn")) throw std::runtime_error("[Runtime Error]: reduce() expects callback argument.");
+                        Value cb = aMap.get("fn");
+                        bool hasInitial = aMap.has("initial");
+                        Value acc = hasInitial ? aMap.get("initial") : Value();
 
                         if (!arr || arr->empty()) {
                             if (hasInitial) return acc;
@@ -1595,8 +1671,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     push(Value(static_cast<int64_t>(mapObj ? mapObj->keys.size() : 0)));
                 } else if (memberName == "keys") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: keys() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "keys()");
                         ArrayPtr arr = std::make_shared<ObjArray>();
                         if (mapObj) {
                             for (const Value& k : mapObj->keys) arr->push_back(k);
@@ -1605,8 +1681,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "values") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: values() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "values()");
                         ArrayPtr arr = std::make_shared<ObjArray>();
                         if (mapObj) {
                             for (const Value& k : mapObj->keys) arr->push_back(mapObj->get(k));
@@ -1615,24 +1691,26 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "contains") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: contains() expects 1 key argument.");
-                        if (!mapObj || !ObjMap::isSupportedKey(args[0])) return Value(false);
-                        return Value(mapObj->contains(args[0]));
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"key"}}, "contains()");
+                        if (!aMap.has("key")) throw std::runtime_error("[Runtime Error]: contains() expects 1 key argument.");
+                        Value key = aMap.get("key");
+                        if (!mapObj || !ObjMap::isSupportedKey(key)) return Value(false);
+                        return Value(mapObj->contains(key));
                     })));
                 } else if (memberName == "remove") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: remove() expects 1 key argument.");
-                        if (!mapObj || !ObjMap::isSupportedKey(args[0])) return Value();
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"key"}}, "remove()");
+                        if (!aMap.has("key")) throw std::runtime_error("[Runtime Error]: remove() expects 1 key argument.");
+                        Value key = aMap.get("key");
+                        if (!mapObj || !ObjMap::isSupportedKey(key)) return Value();
                         Value removed;
-                        if (mapObj->remove(args[0], &removed)) return removed;
+                        if (mapObj->remove(key, &removed)) return removed;
                         return Value(); // nil
                     })));
                 } else if (memberName == "put") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
                         if (!mapObj) throw std::runtime_error("[Runtime Error]: Invalid map target.");
-                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {"key", "val"}, "put()");
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"key"}, {"val"}}, "put()");
                         if (!aMap.has("key") || !aMap.has("val")) {
                             throw std::runtime_error("[Runtime Error]: put() requires 'key' and 'val' arguments.");
                         }
@@ -1641,10 +1719,20 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                         if (!ObjMap::isSupportedKey(key)) {
                             throw std::runtime_error("[Runtime Error]: Map key must be a supported scalar type (int, float, string, char, bool).");
                         }
+                        if (mapObj->typeSpec.keyKind != TypeKind::ANY && mapObj->typeSpec.keyKind != TypeKind::UNTYPED) {
+                            TypeSpec expectedKeySpec = mapObj->typeSpec.keyType ? *mapObj->typeSpec.keyType : TypeSpec{mapObj->typeSpec.keyKind};
+                            if (!checkAndCoerceValueType(expectedKeySpec, key)) {
+                                throw std::runtime_error("[Runtime Error]: Map put key type mismatch: expected " +
+                                                         expectedKeySpec.toString() + " but got " +
+                                                         key.getTypeSpec().toString() + ".");
+                            }
+                        }
                         if (mapObj->typeSpec.valueKind != TypeKind::ANY && mapObj->typeSpec.valueKind != TypeKind::UNTYPED) {
                             TypeSpec expectedValSpec = mapObj->typeSpec.valType ? *mapObj->typeSpec.valType : TypeSpec{mapObj->typeSpec.valueKind};
                             if (!checkAndCoerceValueType(expectedValSpec, val)) {
-                                throw std::runtime_error("[Runtime Error]: Map put type mismatch.");
+                                throw std::runtime_error("[Runtime Error]: Map put value type mismatch: expected " +
+                                                         expectedValSpec.toString() + " but got " +
+                                                         val.getTypeSpec().toString() + ".");
                             }
                         }
                         mapObj->set(key, val);
@@ -1652,15 +1740,16 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "get") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: get() expects 1 key argument.");
-                        if (!mapObj || !ObjMap::isSupportedKey(args[0])) return Value();
-                        return mapObj->get(args[0]);
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"key"}}, "get()");
+                        if (!aMap.has("key")) throw std::runtime_error("[Runtime Error]: get() expects 1 key argument.");
+                        Value key = aMap.get("key");
+                        if (!mapObj || !ObjMap::isSupportedKey(key)) return Value();
+                        return mapObj->get(key);
                     })));
                 } else if (memberName == "clear") {
                     push(Value(NativeFn([mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: clear() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "clear()");
                         if (mapObj) {
                             mapObj->checkLock();
                             mapObj->table.clear();
@@ -1670,9 +1759,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "map") {
                     push(Value(NativeFn([this, mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: map() expects 1 callback argument.");
-                        Value cb = args[0];
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"fn", "cb", "callback"}}, "map()");
+                        if (!aMap.has("fn")) throw std::runtime_error("[Runtime Error]: map() expects 1 callback argument.");
+                        Value cb = aMap.get("fn");
                         if (!mapObj) return Value(std::make_shared<ObjMap>());
 
                         mapObj->lockCount++;
@@ -1682,6 +1771,14 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                             for (const Value& k : mapObj->keys) {
                                 Value v = mapObj->get(k);
                                 Value res = runCallback(cb, {v, k, Value(mapObj)}, 3);
+                                if (mapObj->typeSpec.valueKind != TypeKind::ANY && mapObj->typeSpec.valueKind != TypeKind::UNTYPED) {
+                                    TypeSpec valSpec = mapObj->typeSpec.valType ? *mapObj->typeSpec.valType : TypeSpec{mapObj->typeSpec.valueKind};
+                                    if (!checkAndCoerceValueType(valSpec, res)) {
+                                        throw std::runtime_error("[Runtime Error]: Callback returned value of type " +
+                                                                 res.getTypeSpec().toString() + " incompatible with map value type " +
+                                                                 valSpec.toString() + ".");
+                                    }
+                                }
                                 result->set(k, res);
                             }
                         } catch (...) {
@@ -1693,9 +1790,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "filter") {
                     push(Value(NativeFn([this, mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1) throw std::runtime_error("[Runtime Error]: filter() expects 1 callback argument.");
-                        Value cb = args[0];
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"fn", "cb", "callback"}}, "filter()");
+                        if (!aMap.has("fn")) throw std::runtime_error("[Runtime Error]: filter() expects 1 callback argument.");
+                        Value cb = aMap.get("fn");
                         if (!mapObj) return Value(std::make_shared<ObjMap>());
 
                         mapObj->lockCount++;
@@ -1718,11 +1815,11 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     })));
                 } else if (memberName == "reduce") {
                     push(Value(NativeFn([this, mapObj](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount < 1 || argCount > 2) throw std::runtime_error("[Runtime Error]: reduce() expects 1 callback and optional initial value.");
-                        Value cb = args[0];
-                        bool hasInitial = (argCount == 2);
-                        Value acc = hasInitial ? args[1] : Value();
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"fn", "cb", "callback"}, {"initial", "acc"}}, "reduce()");
+                        if (!aMap.has("fn")) throw std::runtime_error("[Runtime Error]: reduce() expects callback argument.");
+                        Value cb = aMap.get("fn");
+                        bool hasInitial = aMap.has("initial");
+                        Value acc = hasInitial ? aMap.get("initial") : Value();
 
                         if (!mapObj || mapObj->keys.empty()) {
                             if (hasInitial) return acc;
@@ -1762,58 +1859,72 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     push(Value(static_cast<int64_t>(utf8_length(sVal))));
                 } else if (memberName == "upper") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: upper() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "upper()");
                         return Value(utf8_upper(sVal));
                     })));
                 } else if (memberName == "lower") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: lower() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "lower()");
                         return Value(utf8_lower(sVal));
                     })));
                 } else if (memberName == "trim") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)args; (void)argNames;
-                        if (argCount != 0) throw std::runtime_error("[Runtime Error]: trim() expects 0 arguments.");
+                        (void)args;
+                        parseCallArgs(argCount, args, argNames, {}, "trim()");
                         return Value(utf8_trim(sVal));
                     })));
                 } else if (memberName == "contains") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1 || !args[0].isString()) throw std::runtime_error("[Runtime Error]: contains() expects 1 string argument.");
-                        return Value(sVal.find(args[0].str) != std::string::npos);
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "substr", "str"}}, "contains()");
+                        if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: contains() expects 1 string argument.");
+                        Value sub = aMap.get("val");
+                        if (!sub.isString()) throw std::runtime_error("[Runtime Error]: contains() expects 1 string argument.");
+                        return Value(sVal.find(sub.str) != std::string::npos);
                     })));
                 } else if (memberName == "starts_with") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1 || !args[0].isString()) throw std::runtime_error("[Runtime Error]: starts_with() expects 1 string argument.");
-                        return Value(sVal.rfind(args[0].str, 0) == 0);
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"prefix", "val", "str"}}, "starts_with()");
+                        if (!aMap.has("prefix")) throw std::runtime_error("[Runtime Error]: starts_with() expects 1 string argument.");
+                        Value pre = aMap.get("prefix");
+                        if (!pre.isString()) throw std::runtime_error("[Runtime Error]: starts_with() expects 1 string argument.");
+                        return Value(sVal.rfind(pre.str, 0) == 0);
                     })));
                 } else if (memberName == "ends_with") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
-                        if (argCount != 1 || !args[0].isString()) throw std::runtime_error("[Runtime Error]: ends_with() expects 1 string argument.");
-                        if (args[0].str.length() > sVal.length()) return Value(false);
-                        return Value(sVal.compare(sVal.length() - args[0].str.length(), args[0].str.length(), args[0].str) == 0);
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"suffix", "val", "str"}}, "ends_with()");
+                        if (!aMap.has("suffix")) throw std::runtime_error("[Runtime Error]: ends_with() expects 1 string argument.");
+                        Value suf = aMap.get("suffix");
+                        if (!suf.isString()) throw std::runtime_error("[Runtime Error]: ends_with() expects 1 string argument.");
+                        if (suf.str.length() > sVal.length()) return Value(false);
+                        return Value(sVal.compare(sVal.length() - suf.str.length(), suf.str.length(), suf.str) == 0);
                     })));
                 } else if (memberName == "split") {
                     push(Value(NativeFn([sVal](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
-                        (void)argNames;
+                        ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"delimiter", "sep", "val"}}, "split()");
                         ArrayPtr arr = std::make_shared<ObjArray>();
-                        if (argCount == 0) {
-                            // Whitespace splitting
-                            std::string trimmed = utf8_trim(sVal);
-                            if (trimmed.empty()) return Value(arr);
-                            std::stringstream ss(trimmed);
-                            std::string token;
-                            while (ss >> token) {
-                                arr->push_back(Value(token));
+                        if (!aMap.has("delimiter")) {
+                            std::vector<std::string> chars = utf8_to_chars(sVal);
+                            std::string currentToken = "";
+                            for (const auto& cStr : chars) {
+                                if (is_unicode_space(utf8_code_point(cStr))) {
+                                    if (!currentToken.empty()) {
+                                        arr->push_back(Value(currentToken));
+                                        currentToken = "";
+                                    }
+                                } else {
+                                    currentToken += cStr;
+                                }
+                            }
+                            if (!currentToken.empty()) {
+                                arr->push_back(Value(currentToken));
                             }
                             return Value(arr);
                         }
-                        if (argCount != 1 || !args[0].isString()) throw std::runtime_error("[Runtime Error]: split() expects string delimiter.");
-                        std::string delim = args[0].str;
+                        Value delimVal = aMap.get("delimiter");
+                        if (!delimVal.isString()) throw std::runtime_error("[Runtime Error]: split() expects string delimiter.");
+                        std::string delim = delimVal.str;
                         if (delim.empty()) {
                             for (const auto& cStr : utf8_to_chars(sVal)) {
                                 arr->push_back(Value(cStr));
@@ -2046,6 +2157,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return false;
                 }
                 Value oldVal = target.map->contains(indexVal) ? target.map->get(indexVal) : Value();
+                if (target.map->typeSpec.keyKind != TypeKind::ANY && target.map->typeSpec.keyKind != TypeKind::UNTYPED) {
+                    TypeSpec expectedKeySpec = target.map->typeSpec.keyType ? *target.map->typeSpec.keyType : TypeSpec{target.map->typeSpec.keyKind};
+                    if (!checkAndCoerceValueType(expectedKeySpec, indexVal)) {
+                        std::cout << "[Runtime Error]: Type mismatch for map key assignment: expected "
+                                  << expectedKeySpec.toString() << " but got "
+                                  << indexVal.getTypeSpec().toString() << "." << std::endl;
+                        return false;
+                    }
+                }
                 if (target.map->typeSpec.valueKind != TypeKind::ANY && target.map->typeSpec.valueKind != TypeKind::UNTYPED) {
                     TypeSpec expectedValSpec = target.map->typeSpec.valType ? *target.map->typeSpec.valType : TypeSpec{target.map->typeSpec.valueKind};
                     if (!checkAndCoerceValueType(expectedValSpec, val)) {
@@ -2183,6 +2303,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 if (!target.map) {
                     std::cout << "[Runtime Error]: Invalid map target." << std::endl;
                     return false;
+                }
+                if (target.map->typeSpec.keyKind != TypeKind::ANY && target.map->typeSpec.keyKind != TypeKind::UNTYPED) {
+                    TypeSpec expectedKeySpec = target.map->typeSpec.keyType ? *target.map->typeSpec.keyType : TypeSpec{target.map->typeSpec.keyKind};
+                    if (!checkAndCoerceValueType(expectedKeySpec, indexVal)) {
+                        std::cout << "[Runtime Error]: Type mismatch for map key assignment: expected "
+                                  << expectedKeySpec.toString() << " but got "
+                                  << indexVal.getTypeSpec().toString() << "." << std::endl;
+                        return false;
+                    }
                 }
                 if (target.map->typeSpec.valueKind != TypeKind::ANY && target.map->typeSpec.valueKind != TypeKind::UNTYPED) {
                     TypeSpec expectedValSpec = target.map->typeSpec.valType ? *target.map->typeSpec.valType : TypeSpec{target.map->typeSpec.valueKind};

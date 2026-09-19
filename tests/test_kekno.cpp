@@ -797,8 +797,97 @@ static void testV052Modules() {
     fs::remove_all("test_mods");
 }
 
+void testV056RegressionSuite() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Typed map key and value rejections
+    out = runCodeFresh("let map<string, int> data = {} ~ data[123] = 10 ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Type mismatch for map key assignment") != std::string::npos, "typed map key rejection on direct indexing");
+
+    out = runCodeFresh("let map<string, int> data = {} ~ data[\"x\"] = \"wrong\" ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Type mismatch for map assignment") != std::string::npos, "typed map value rejection on direct indexing");
+
+    out = runCodeFresh("let map<string, int> data = {} ~ data.put(key=123, val=10) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Map put key type mismatch") != std::string::npos, "typed map key rejection on put()");
+
+    out = runCodeFresh("let map<string, int> data = {} ~ data.put(key=\"x\", val=\"wrong\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Map put value type mismatch") != std::string::npos, "typed map value rejection on put()");
+
+    out = runCodeFresh("let map<string, int> data = {123: 10} ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "typed map initialization key mismatch rejection");
+
+    // 2. Typed array map() and typed map map() result validation
+    out = runCodeFresh("let array<int> nums = [1, 2, 3] ~ task bad(x) { give \"wrong\" ~ } nums.map(bad) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("incompatible with array element type") != std::string::npos, "typed array map() callback return type validation");
+
+    out = runCodeFresh("let map<string, int> m = {\"a\": 1} ~ task bad(v, k) { give \"wrong\" ~ } m.map(bad) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("incompatible with map value type") != std::string::npos, "typed map map() callback return type validation");
+
+    out = runCodeFresh("let nums = [1, 2] ~ task bad(x) { give \"str\" ~ } echo nums.map(bad) ~", ok);
+    TEST_ASSERT(ok && out.find("[\"str\", \"str\"]") != std::string::npos, "dynamic array map() allows type transformation");
+
+    out = runCodeFresh("let m = {\"a\": 1} ~ task bad(v, k) { give \"str\" ~ } echo m.map(bad) ~", ok);
+    TEST_ASSERT(ok && out.find("{\"a\": \"str\"}") != std::string::npos, "dynamic map map() allows value type transformation");
+
+    // 3. Named arguments validation on collection and string methods
+    out = runCodeFresh("[1, 2].contains(foo=2) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Unexpected argument name 'foo'") != std::string::npos, "contains() rejects unknown named argument");
+
+    out = runCodeFresh("[1, 2].contains(2, val=2) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Duplicate argument 'val'") != std::string::npos, "contains() rejects duplicate argument");
+
+    out = runCodeFresh("[1, 2].contains() ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("contains() expects 1 argument") != std::string::npos, "contains() rejects missing argument");
+
+    out = runCodeFresh("[1, 2].contains(1, 2) ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Too many arguments provided") != std::string::npos, "contains() rejects too many arguments");
+
+    out = runCodeFresh("\"hello\".starts_with(foo=\"h\") ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Unexpected argument name 'foo'") != std::string::npos, "starts_with() rejects unknown argument name");
+
+    out = runCodeFresh("let arr = [] ~ arr.push(val=10) ~ echo arr ~", ok);
+    TEST_ASSERT(ok && out.find("[10]") != std::string::npos, "push() named argument 'val'");
+
+    out = runCodeFresh("let arr = [1, 2, 3] ~ echo arr.pop(ind=0) ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "pop() named argument 'ind'");
+
+    out = runCodeFresh("let arr = [1, 3] ~ arr.insert(ind=1, val=2) ~ echo arr ~", ok);
+    TEST_ASSERT(ok && out.find("[1, 2, 3]") != std::string::npos, "insert() named arguments");
+
+    out = runCodeFresh("let arr = [10, 20] ~ arr.remove(val=10) ~ echo arr ~", ok);
+    TEST_ASSERT(ok && out.find("[20]") != std::string::npos, "remove() named argument 'val'");
+
+    out = runCodeFresh("let m = {} ~ m.put(key=\"k\", val=\"v\") ~ echo m.get(key=\"k\") ~ echo m.contains(key=\"k\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> v") != std::string::npos && out.find("=> true") != std::string::npos, "map put(), get(), contains() named arguments");
+
+    // 4. Negative indexing, slicing boundaries, empty collections, nil values
+    out = runCodeFresh("let arr = [10, 20, 30] ~ echo arr[-1] ~ echo arr[-3] ~", ok);
+    TEST_ASSERT(ok && out.find("=> 30") != std::string::npos && out.find("=> 10") != std::string::npos, "array negative indexing");
+
+    out = runCodeFresh("let s = \"hello\" ~ echo s[::-1] ~", ok);
+    TEST_ASSERT(ok && out.find("olleh") != std::string::npos, "string step -1 reverse slice");
+
+    out = runCodeFresh("[].pop() ~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Cannot pop from empty array") != std::string::npos, "empty array pop error");
+
+    out = runCodeFresh("let m = {} ~ echo m.get(\"absent\") ~", ok);
+    TEST_ASSERT(ok && out.find("=> nil") != std::string::npos, "map get absent key gives nil");
+
+    // 5. Numeric key equality and map insertion order after key update
+    out = runCodeFresh("let m = {} ~ m[1] = \"int\" ~ m[1.0] = \"float\" ~ echo m.length ~ echo m[1] ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos && out.find("=> float") != std::string::npos, "numeric key equality between int 1 and float 1.0");
+
+    out = runCodeFresh("let m = {\"a\": 1, \"b\": 2, \"c\": 3} ~ m[\"a\"] = 10 ~ echo m.keys() ~", ok);
+    TEST_ASSERT(ok && out.find("[\"b\", \"c\", \"a\"]") != std::string::npos, "map insertion order updated when reassigning existing key");
+
+    // 6. Unicode string indexing, slicing, split(""), upper, lower
+    out = runCodeFresh("let s = \"Hello 👋 World 🌍\" ~ echo s.length ~ echo s[0] ~ echo s.upper() ~ echo s.lower() ~", ok);
+    TEST_ASSERT(ok && out.find("=> 15") != std::string::npos && out.find("H") != std::string::npos && out.find("HELLO 👋 WORLD 🌍") != std::string::npos && out.find("hello 👋 world 🌍") != std::string::npos, "unicode string operations without corruption");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.5.5 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.5.6 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -821,6 +910,7 @@ int main() {
     testV046Patches();
     testV050Features();
     testV052Modules();
+    testV056RegressionSuite();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;
