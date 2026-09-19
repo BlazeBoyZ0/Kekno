@@ -288,15 +288,20 @@ Token Lexer::nextToken() {
                 return errorToken("Floating point literal out of range '" + numStr + "'", startLine, startCol);
             }
         } else {
-            try {
-                size_t pos = 0;
-                t.intValue = std::stoll(numStr, &pos, 10);
-                if (pos != numStr.length()) {
-                    return errorToken("Malformed integer literal '" + numStr + "'", startLine, startCol);
-                }
+            if (numStr == "9223372036854775808") {
                 t.type = TokenType::INT_LITERAL;
-            } catch (...) {
-                return errorToken("Integer literal out of 64-bit range '" + numStr + "'", startLine, startCol);
+                t.intValue = std::numeric_limits<int64_t>::min();
+            } else {
+                try {
+                    size_t pos = 0;
+                    t.intValue = std::stoll(numStr, &pos, 10);
+                    if (pos != numStr.length()) {
+                        return errorToken("Malformed integer literal '" + numStr + "'", startLine, startCol);
+                    }
+                    t.type = TokenType::INT_LITERAL;
+                } catch (...) {
+                    return errorToken("Integer literal out of 64-bit range '" + numStr + "'", startLine, startCol);
+                }
             }
         }
         return t;
