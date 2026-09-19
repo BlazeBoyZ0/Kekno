@@ -174,6 +174,12 @@ static ArgMap parseCallArgs(int argCount, Value* args, const std::vector<std::st
 }
 
 static Value performSlice(const Value& target, const SlicePtr& slice) {
+    if (slice->hasStart && !slice->start.isInt()) {
+        throw std::runtime_error("[Runtime Error]: Slice start index must be an integer.");
+    }
+    if (slice->hasEnd && !slice->end.isInt()) {
+        throw std::runtime_error("[Runtime Error]: Slice end index must be an integer.");
+    }
     int64_t step = 1;
     if (slice->hasStep) {
         if (!slice->step.isInt()) {
@@ -541,7 +547,16 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
         return true;
     }
     if (expected.kind == TypeKind::INT) {
-        return val.isInt();
+        if (val.isInt()) return true;
+        if (val.isFloat()) {
+            double f = val.floatVal;
+            if (!std::isnan(f) && !std::isinf(f) && std::trunc(f) == f &&
+                f >= -9223372036854775808.0 && f <= 9223372036854775807.0) {
+                val = Value(static_cast<int64_t>(f));
+                return true;
+            }
+        }
+        return false;
     }
     if (expected.kind == TypeKind::FLOAT) {
         if (val.isFloat()) return true;
@@ -566,59 +581,69 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     if (expected.kind == TypeKind::ARRAY) {
         if (!val.isArray()) return false;
         if (!val.array) return true;
-        // If assigning dynamic/untyped collection to typed variable, create typed copy if needed
-        bool needsCopy = (val.array->typeSpec.elementKind != expected.elementKind) ||
-                         (val.array->typeSpec.kind == TypeKind::ARRAY && val.array->typeSpec.elementKind == TypeKind::ANY && expected.elementKind != TypeKind::ANY);
-        ArrayPtr targetArr = val.array;
-        if (needsCopy) {
-            targetArr = std::make_shared<ObjArray>();
-            targetArr->elements = val.array->elements;
-            targetArr->typeSpec = expected;
-        }
 
-        if (expected.elementKind != TypeKind::ANY && expected.elementKind != TypeKind::UNTYPED) {
+        if (val.array->typeSpec != expected) {
+            ArrayPtr targetArr = std::make_shared<ObjArray>();
+            targetArr->typeSpec = expected;
             TypeSpec elemSpec = expected.elemType ? *expected.elemType : TypeSpec{expected.elementKind};
-            for (size_t i = 0; i < targetArr->elements.size(); ++i) {
-                if (!checkAndCoerceValueType(elemSpec, targetArr->elements[i])) {
-                    return false;
+
+            for (size_t i = 0; i < val.array->elements.size(); ++i) {
+                Value elemCopy = val.array->elements[i];
+                if (expected.elementKind != TypeKind::ANY && expected.elementKind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(elemSpec, elemCopy)) {
+                        return false;
+                    }
                 }
+                targetArr->push_back(elemCopy);
             }
-        }
-        if (needsCopy) {
             val = Value(targetArr);
         } else {
-            val.array->typeSpec = expected;
+            if (expected.elementKind != TypeKind::ANY && expected.elementKind != TypeKind::UNTYPED) {
+                TypeSpec elemSpec = expected.elemType ? *expected.elemType : TypeSpec{expected.elementKind};
+                for (size_t i = 0; i < val.array->elements.size(); ++i) {
+                    if (!checkAndCoerceValueType(elemSpec, val.array->elements[i])) {
+                        return false;
+                    }
+                }
+            }
         }
         return true;
     }
     if (expected.kind == TypeKind::MAP) {
         if (!val.isMap()) return false;
         if (!val.map) return true;
-        bool needsCopy = (val.map->typeSpec.keyKind != expected.keyKind || val.map->typeSpec.valueKind != expected.valueKind) ||
-                         (val.map->typeSpec.keyKind == TypeKind::ANY && val.map->typeSpec.valueKind == TypeKind::ANY && (expected.keyKind != TypeKind::ANY || expected.valueKind != TypeKind::ANY));
-        MapPtr targetMap = val.map;
-        if (needsCopy) {
-            targetMap = std::make_shared<ObjMap>();
-            targetMap->table = val.map->table;
-            targetMap->keys = val.map->keys;
-            targetMap->typeSpec = expected;
-        }
 
-        TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind};
-        TypeSpec valSpec = expected.valType ? *expected.valType : TypeSpec{expected.valueKind};
-        for (auto& pair : targetMap->table) {
-            Value kVal = pair.first.val;
-            if (keySpec.kind != TypeKind::ANY && keySpec.kind != TypeKind::UNTYPED) {
-                if (!checkAndCoerceValueType(keySpec, kVal)) return false;
+        if (val.map->typeSpec != expected) {
+            MapPtr targetMap = std::make_shared<ObjMap>();
+            targetMap->typeSpec = expected;
+            TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind};
+            TypeSpec valSpec = expected.valType ? *expected.valType : TypeSpec{expected.valueKind};
+
+            for (size_t i = 0; i < val.map->keys.size(); ++i) {
+                Value kCopy = val.map->keys[i];
+                Value vCopy = val.map->get(kCopy);
+
+                if (keySpec.kind != TypeKind::ANY && keySpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(keySpec, kCopy)) return false;
+                }
+                if (valSpec.kind != TypeKind::ANY && valSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(valSpec, vCopy)) return false;
+                }
+                targetMap->set(kCopy, vCopy);
             }
-            if (valSpec.kind != TypeKind::ANY && valSpec.kind != TypeKind::UNTYPED) {
-                if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
-            }
-        }
-        if (needsCopy) {
             val = Value(targetMap);
         } else {
-            val.map->typeSpec = expected;
+            TypeSpec keySpec = expected.keyType ? *expected.keyType : TypeSpec{expected.keyKind};
+            TypeSpec valSpec = expected.valType ? *expected.valType : TypeSpec{expected.valueKind};
+            for (auto& pair : val.map->table) {
+                Value kVal = pair.first.val;
+                if (keySpec.kind != TypeKind::ANY && keySpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(keySpec, kVal)) return false;
+                }
+                if (valSpec.kind != TypeKind::ANY && valSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(valSpec, pair.second)) return false;
+                }
+            }
         }
         return true;
     }
@@ -943,7 +968,12 @@ VM::VM() {
         ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "x"}}, "abs()");
         if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: abs() expects 1 argument.");
         Value val = aMap.get("val");
-        if (val.isInt()) return Value(std::abs(val.intVal));
+        if (val.isInt()) {
+            if (val.intVal == std::numeric_limits<int64_t>::min()) {
+                throw std::runtime_error("[Runtime Error]: 64-bit integer overflow in abs().");
+            }
+            return Value(std::abs(val.intVal));
+        }
         if (val.isFloat()) return Value(std::abs(val.floatVal));
         throw std::runtime_error("[Runtime Error]: abs() expects a number.");
     }));
@@ -2397,6 +2427,27 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 return false;
             }
 
+            auto attachOrMergeModule = [](ModulePtr parent, const std::string& name, ModulePtr newMod, bool isPublic, bool isConst) {
+                auto it = parent->globals.find(name);
+                if (it != parent->globals.end() && it->second.isModule() && it->second.module) {
+                    ModulePtr existing = it->second.module;
+                    if (existing != newMod) {
+                        for (const auto& pair : existing->globals) {
+                            if (newMod->globals.find(pair.first) == newMod->globals.end()) {
+                                newMod->globals[pair.first] = pair.second;
+                            }
+                        }
+                        for (const auto& pair : existing->symbols) {
+                            if (newMod->symbols.find(pair.first) == newMod->symbols.end()) {
+                                newMod->symbols[pair.first] = pair.second;
+                            }
+                        }
+                    }
+                }
+                parent->globals[name] = Value(newMod);
+                parent->symbols[name] = SymbolInfo{isPublic, isConst, TypeSpec{TypeKind::ANY}};
+            };
+
             if (!subAlias.empty()) {
                 auto existingSymIt = frame.closure->module->symbols.find(subAlias);
                 if (existingSymIt != frame.closure->module->symbols.end() && existingSymIt->second.isConst) {
@@ -2404,8 +2455,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return false;
                 }
 
-                frame.closure->module->globals[subAlias] = Value(grabbedMod);
-                frame.closure->module->symbols[subAlias] = SymbolInfo{false, true, TypeSpec{TypeKind::ANY}};
+                attachOrMergeModule(frame.closure->module, subAlias, grabbedMod, false, true);
             } else {
                 std::vector<std::string> parts;
                 std::string token;
@@ -2416,8 +2466,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
 
                 if (parts.size() == 1) {
                     std::string name = parts[0];
-                    frame.closure->module->globals[name] = Value(grabbedMod);
-                    frame.closure->module->symbols[name] = SymbolInfo{false, true, TypeSpec{TypeKind::ANY}};
+                    attachOrMergeModule(frame.closure->module, name, grabbedMod, false, true);
                 } else if (!parts.empty()) {
                     std::string rootName = parts[0];
                     ModulePtr parentMod = nullptr;
@@ -2446,8 +2495,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     }
 
                     std::string lastName = parts.back();
-                    parentMod->globals[lastName] = Value(grabbedMod);
-                    parentMod->symbols[lastName] = SymbolInfo{true, false, TypeSpec{TypeKind::ANY}};
+                    attachOrMergeModule(parentMod, lastName, grabbedMod, true, false);
                 }
             }
 
@@ -2457,6 +2505,14 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 if (!call(subClosure, 0, emptyNames, true)) {
                     // Initialization failed, roll back module cache
                     moduleCache.erase(grabbedMod->path);
+                    auto itP = std::find(loadingStackPaths.begin(), loadingStackPaths.end(), grabbedMod->path);
+                    if (itP != loadingStackPaths.end()) {
+                        size_t idx = std::distance(loadingStackPaths.begin(), itP);
+                        loadingStackPaths.erase(itP);
+                        if (idx < loadingStackNames.size()) {
+                            loadingStackNames.erase(loadingStackNames.begin() + idx);
+                        }
+                    }
                     return false;
                 }
             }
@@ -2761,7 +2817,7 @@ void VM::runtimeError(const std::string& message) {
     }
 }
 
-void VM::run(Chunk& mainChunk, const std::string& scriptPath) {
+bool VM::run(Chunk& mainChunk, const std::string& scriptPath) {
     resetStack();
 
     rootModule = std::make_shared<ObjModule>();
@@ -2802,13 +2858,17 @@ void VM::run(Chunk& mainChunk, const std::string& scriptPath) {
 
     push(Value(mainClosure));
     std::vector<std::string> emptyNames;
-    call(mainClosure, 0, emptyNames);
+    if (!call(mainClosure, 0, emptyNames)) {
+        return false;
+    }
 
     while (!frames.empty()) {
         CallFrame& frame = frames.back();
         OpCode instruction = static_cast<OpCode>(*frame.ip++);
         if (!executeInstruction(instruction, frame)) {
-            return;
+            return false;
         }
     }
+
+    return true;
 }

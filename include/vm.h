@@ -37,6 +37,6 @@ private:
 
 public:
     VM();
-    void run(Chunk& chunk, const std::string& scriptPath = "");
+    bool run(Chunk& chunk, const std::string& scriptPath = "");
     void resetStack();
 };

@@ -970,8 +970,200 @@ static void testV058NewFeaturesAndIntegrations() {
     TEST_ASSERT(ok && out.find("at inner()") != std::string::npos && out.find("at outer()") != std::string::npos, "nested task call traceback diagnostics");
 }
 
+static void testV059RegressionSuite() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Captured locals and halt / skip
+    std::string closureHaltCode =
+        "let getFn = nil~\n"
+        "for (let i = 0~ i < 5~ i += 1) {\n"
+        "    let captured = i * 10~\n"
+        "    task fn() { give captured~\n }\n"
+        "    if (i == 2) {\n"
+        "        getFn = fn~\n"
+        "        halt~\n"
+        "    }\n"
+        "}\n"
+        "echo getFn()~\n";
+    out = runCodeFresh(closureHaltCode, ok);
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos, "captured local closed correctly on halt");
+
+    std::string closureSkipCode =
+        "let fnList = []~\n"
+        "for (let i = 0~ i < 5~ i += 1) {\n"
+        "    let captured = i * 10~\n"
+        "    task fn() { give captured~\n }\n"
+        "    fnList.push(fn)~\n"
+        "    if (i == 2) {\n"
+        "        skip~\n"
+        "    }\n"
+        "}\n"
+        "echo fnList[2]()~\n";
+    out = runCodeFresh(closureSkipCode, ok);
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos, "captured local closed correctly on skip");
+
+    std::string nestedCapturedCode =
+        "task makeClosures() {\n"
+        "    let funcs = []~\n"
+        "    for (let i = 0~ i < 3~ i += 1) {\n"
+        "        let x = i + 1~\n"
+        "        for (let j = 0~ j < 2~ j += 1) {\n"
+        "            let y = (j + 1) * 100~\n"
+        "            task closure() { give x + y~\n }\n"
+        "            funcs.push(closure)~\n"
+        "            if (j == 0) { skip~\n }\n"
+        "        }\n"
+        "        if (i == 1) { halt~\n }\n"
+        "    }\n"
+        "    give funcs~\n"
+        "}\n"
+        "let fList = makeClosures()~\n"
+        "echo fList[0]()~\n";
+    out = runCodeFresh(nestedCapturedCode, ok);
+    TEST_ASSERT(ok && out.find("=> 101") != std::string::npos, "nested captured locals with halt and skip");
+
+    // 2. Recursive typed collection conversion
+    std::string recArrayCode =
+        "let a = [[1, 2]]~\n"
+        "let array<array<int>> ai = a~\n"
+        "let array<array<float>> af = ai~\n"
+        "af[0][0] = 99.0~\n"
+        "echo a[0][0]~\n"
+        "echo ai[0][0]~\n"
+        "echo af[0][0]~\n";
+    out = runCodeFresh(recArrayCode, ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 1\n=> 99.0") != std::string::npos, "recursive typed array conversion independent semantics");
+
+    std::string recMapCode =
+        "let m = {\"k\": {\"inner\": 1}}~\n"
+        "let map<string, map<string, float>> mf = m~\n"
+        "mf[\"k\"][\"inner\"] = 42.5~\n"
+        "echo m[\"k\"][\"inner\"]~\n"
+        "echo mf[\"k\"][\"inner\"]~\n";
+    out = runCodeFresh(recMapCode, ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 42.5") != std::string::npos, "recursive typed map conversion independent semantics");
+
+    std::string arrayWithMapsCode =
+        "let am = [{\"x\": 1}]~\n"
+        "let array<map<string, float>> am_f = am~\n"
+        "am_f[0][\"x\"] = 9.5~\n"
+        "echo am[0][\"x\"]~\n"
+        "echo am_f[0][\"x\"]~\n";
+    out = runCodeFresh(arrayWithMapsCode, ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 9.5") != std::string::npos, "array containing maps recursive conversion");
+
+    std::string mapWithArraysCode =
+        "let ma = {\"k\": [10, 20]}~\n"
+        "let map<string, array<float>> ma_f = ma~\n"
+        "ma_f[\"k\"][0] = 99.9~\n"
+        "echo ma[\"k\"][0]~\n"
+        "echo ma_f[\"k\"][0]~\n";
+    out = runCodeFresh(mapWithArraysCode, ok);
+    TEST_ASSERT(ok && out.find("=> 10\n=> 99.9") != std::string::npos, "map containing arrays recursive conversion");
+
+    // 3. Module namespace merging and order independence
+    fs::create_directories("test_v59_mods/a/b");
+    {
+        std::ofstream f("test_v59_mods/a.kek");
+        f << "pub let name = \"mod_a\"~\n";
+        f.close();
+    }
+    {
+        std::ofstream f("test_v59_mods/a/b.kek");
+        f << "pub let name = \"mod_ab\"~\n";
+        f.close();
+    }
+    {
+        std::ofstream f("test_v59_mods/a/b/d.kek");
+        f << "pub let name = \"mod_abd\"~\n";
+        f.close();
+    }
+    {
+        std::ofstream f("test_v59_mods/a/c.kek");
+        f << "pub let name = \"mod_ac\"~\n";
+        f.close();
+    }
+
+    out = runCodeFresh("grab a.b~\n grab a~\n echo a.name~\n echo a.b.name~\n", ok, "test_v59_mods/main.kek");
+    TEST_ASSERT(ok && out.find("=> mod_a") != std::string::npos && out.find("=> mod_ab") != std::string::npos, "module import order grab a.b then grab a");
+
+    out = runCodeFresh("grab a~\n grab a.b~\n echo a.name~\n echo a.b.name~\n", ok, "test_v59_mods/main.kek");
+    TEST_ASSERT(ok && out.find("=> mod_a") != std::string::npos && out.find("=> mod_ab") != std::string::npos, "module import order grab a then grab a.b");
+
+    out = runCodeFresh("grab a.b.d~\n grab a.c~\n grab a.b~\n grab a~\n echo a.name~\n echo a.b.name~\n echo a.c.name~\n echo a.b.d.name~\n", ok, "test_v59_mods/main.kek");
+    TEST_ASSERT(ok && out.find("=> mod_a") != std::string::npos && out.find("=> mod_ab") != std::string::npos && out.find("=> mod_ac") != std::string::npos && out.find("=> mod_abd") != std::string::npos, "multiple nested dotted module paths coexist");
+
+    fs::remove_all("test_v59_mods");
+
+    // 4. Slice argument validation
+    out = runCodeFresh("let arr = [1, 2, 3]~ echo arr[1.5:2]~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Slice start index must be an integer") != std::string::npos, "fractional slice start rejection");
+
+    out = runCodeFresh("let arr = [1, 2, 3]~ echo arr[1:2.5]~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Slice end index must be an integer") != std::string::npos, "fractional slice end rejection");
+
+    out = runCodeFresh("let arr = [1, 2, 3]~ echo arr.slice(start=1.5)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Slice start index must be an integer") != std::string::npos, "array.slice method fractional start rejection");
+
+    out = runCodeFresh("let str = \"hello\"~ echo str[1.5:3]~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "string fractional slice start rejection");
+
+    // 5. Full int64 range and abs(INT64_MIN)
+    out = runCodeFresh("let minVal = -9223372036854775808~ echo minVal~", ok);
+    TEST_ASSERT(ok && out.find("=> -9223372036854775808") != std::string::npos, "full int64 min value -9223372036854775808");
+
+    out = runCodeFresh("let maxVal = 9223372036854775807~ echo maxVal~", ok);
+    TEST_ASSERT(ok && out.find("=> 9223372036854775807") != std::string::npos, "full int64 max value 9223372036854775807");
+
+    out = runCodeFresh("echo abs(-9223372036854775808)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("integer overflow in abs()") != std::string::npos, "abs(INT64_MIN) integer overflow runtime error");
+
+    out = runCodeFresh("echo -(-9223372036854775808)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("integer multiplication overflow") != std::string::npos, "unary negation of INT64_MIN overflow error");
+
+    out = runCodeFresh("let bad = 9223372036854775808~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("out of 64-bit range") != std::string::npos, "positive 9223372036854775808 rejected");
+
+    // 6. Typed map key coercion
+    out = runCodeFresh("let m = {1: \"x\"}~\n let map<float, string> n = m~\n echo n.keys()~\n echo typeof(n.keys()[0])~\n", ok);
+    TEST_ASSERT(ok && out.find("[1.0]") != std::string::npos && out.find("=> float") != std::string::npos, "int -> float map key coercion");
+
+    out = runCodeFresh("let m = {1.0: \"x\"}~\n let map<int, string> n = m~\n echo n.keys()~\n echo typeof(n.keys()[0])~\n", ok);
+    TEST_ASSERT(ok && out.find("[1]") != std::string::npos && out.find("=> int") != std::string::npos, "float -> int map key coercion when whole number");
+
+    out = runCodeFresh("let m = {1.5: \"x\"}~\n let map<int, string> n = m~\n", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int map key conversion rejected when non-whole number");
+
+    out = runCodeFresh("let map<float, string> m = {}~\n m[1] = \"val\"~\n echo typeof(m.keys()[0])~\n", ok);
+    TEST_ASSERT(ok && out.find("=> float") != std::string::npos, "direct indexing assignment float map key coercion");
+
+    // 7. CLI Exit Codes check
+    {
+        std::ofstream f("/tmp/test_cli_ok.kek");
+        f << "echo 100~\n";
+        f.close();
+
+        std::ofstream f2("/tmp/test_cli_err.kek");
+        f2 << "let x = 1 / 0~\n";
+        f2.close();
+
+        int status1 = std::system("./kekno /tmp/test_cli_ok.kek >/dev/null 2>&1");
+        TEST_ASSERT(WEXITSTATUS(status1) == 0, "CLI exit code 0 on success");
+
+        int status2 = std::system("./kekno /tmp/test_cli_err.kek >/dev/null 2>&1");
+        TEST_ASSERT(WEXITSTATUS(status2) != 0, "CLI exit code non-zero on runtime error");
+
+        int status3 = std::system("./kekno /tmp/non_existent_file.kek >/dev/null 2>&1");
+        TEST_ASSERT(WEXITSTATUS(status3) != 0, "CLI exit code non-zero on missing file");
+
+        std::remove("/tmp/test_cli_ok.kek");
+        std::remove("/tmp/test_cli_err.kek");
+    }
+}
+
 int main() {
-    std::cout << "Running Kekno v0.5.8 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.5.9 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -996,6 +1188,7 @@ int main() {
     testV052Modules();
     testV056RegressionSuite();
     testV058NewFeaturesAndIntegrations();
+    testV059RegressionSuite();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

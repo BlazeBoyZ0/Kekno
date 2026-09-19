@@ -354,6 +354,11 @@ TypeSpec Compiler::parseTypeDeclaration() {
 void Compiler::primary() {
     if (hasError) return;
     if (current.type == TokenType::INT_LITERAL) {
+        if (current.text == "9223372036854775808") {
+            error("Integer literal out of 64-bit range '9223372036854775808'", "Compiler Error");
+            advance();
+            return;
+        }
         emitConstant(Value(current.intValue));
         advance();
     } else if (current.type == TokenType::FLOAT_LITERAL) {
@@ -726,6 +731,11 @@ void Compiler::unary() {
         chunk().writeOp(OpCode::OP_NOT);
     } else if (current.type == TokenType::MINUS) {
         advance();
+        if (current.type == TokenType::INT_LITERAL && current.text == "9223372036854775808") {
+            emitConstant(Value(std::numeric_limits<int64_t>::min()));
+            advance();
+            return;
+        }
         unary();
         emitConstant(Value(static_cast<int64_t>(-1)));
         chunk().writeOp(OpCode::OP_MULTIPLY);
@@ -1122,16 +1132,12 @@ void Compiler::haltStatement() {
     }
     consume(TokenType::TILDE, "Every statement must end with '~'");
 
-    int popsCount = 0;
     for (int i = static_cast<int>(currentContext->locals.size()) - 1; i >= 0; i--) {
         if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
-            popsCount++;
+            chunk().writeOp(OpCode::OP_CLOSE_UPVALUE);
         } else {
             break;
         }
-    }
-    for (int i = 0; i < popsCount; i++) {
-        chunk().writeOp(OpCode::OP_POP);
     }
 
     int breakJump = emitJump(OpCode::OP_JUMP);
@@ -1147,16 +1153,12 @@ void Compiler::skipStatement() {
     }
     consume(TokenType::TILDE, "Every statement must end with '~'");
 
-    int popsCount = 0;
     for (int i = static_cast<int>(currentContext->locals.size()) - 1; i >= 0; i--) {
         if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
-            popsCount++;
+            chunk().writeOp(OpCode::OP_CLOSE_UPVALUE);
         } else {
             break;
         }
-    }
-    for (int i = 0; i < popsCount; i++) {
-        chunk().writeOp(OpCode::OP_POP);
     }
 
     if (currentLoop->continueIP != -1) {

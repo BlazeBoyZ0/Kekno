@@ -5,11 +5,11 @@
 #include "compiler.h"
 #include "vm.h"
 
-static void runFile(const std::string& path) {
+static int runFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
         std::cerr << "Could not open file \"" << path << "\"." << std::endl;
-        return;
+        return 70;
     }
 
     std::stringstream buffer;
@@ -20,9 +20,15 @@ static void runFile(const std::string& path) {
     Chunk bytecode;
     Compiler compiler(source, bytecode);
 
-    if (compiler.compile()) {
-        vm.run(bytecode, path);
+    if (!compiler.compile()) {
+        return 65;
     }
+
+    if (!vm.run(bytecode, path)) {
+        return 70;
+    }
+
+    return 0;
 }
 
 static void runRepl() {
@@ -54,12 +60,11 @@ static void runRepl() {
 int main(int argc, char* argv[]) {
     if (argc == 1) {
         runRepl();
+        return 0;
     } else if (argc == 2) {
-        runFile(argv[1]);
+        return runFile(argv[1]);
     } else {
         std::cerr << "Usage: kekno [path]" << std::endl;
         return 64;
     }
-
-    return 0;
 }
