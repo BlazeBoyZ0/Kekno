@@ -926,6 +926,7 @@ VM::VM() {
             case ValueType::ARRAY: return Value(std::string("array"));
             case ValueType::MAP: return Value(std::string("map"));
             case ValueType::FUNCTION:
+            case ValueType::BOUND_METHOD:
             case ValueType::NATIVE: return Value(std::string("func"));
             case ValueType::MODULE: return Value(std::string("module"));
             case ValueType::NIL: return Value(std::string("nil"));
