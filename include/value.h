@@ -12,10 +12,10 @@
 #include <algorithm>
 #include "chunk.h"
 
-enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE };
+enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE, STRUCT_DEF, STRUCT_INSTANCE };
 
 enum class TypeKind {
-    ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC
+    ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC, STRUCT
 };
 
 struct TypeSpec {
@@ -23,6 +23,7 @@ struct TypeSpec {
     TypeKind elementKind = TypeKind::ANY;
     TypeKind keyKind = TypeKind::ANY;
     TypeKind valueKind = TypeKind::ANY;
+    std::string structName = "";
 
     std::shared_ptr<TypeSpec> elemType = nullptr;
     std::shared_ptr<TypeSpec> keyType = nullptr;
@@ -31,6 +32,7 @@ struct TypeSpec {
     bool operator==(const TypeSpec& other) const {
         if (kind != other.kind || elementKind != other.elementKind ||
             keyKind != other.keyKind || valueKind != other.valueKind) return false;
+        if (kind == TypeKind::STRUCT && structName != other.structName) return false;
         if ((elemType == nullptr) != (other.elemType == nullptr)) return false;
         if (elemType && !(*elemType == *other.elemType)) return false;
         if ((keyType == nullptr) != (other.keyType == nullptr)) return false;
@@ -53,13 +55,35 @@ struct ObjFunction;
 struct ObjClosure;
 struct ObjModule;
 struct ObjSlice;
+struct ObjStructDef;
+struct ObjStructInstance;
 
 using UpvaluePtr = std::shared_ptr<ObjUpvalue>;
 using FunctionPtr = std::shared_ptr<ObjFunction>;
 using ClosurePtr = std::shared_ptr<ObjClosure>;
 using ModulePtr = std::shared_ptr<ObjModule>;
 using SlicePtr = std::shared_ptr<ObjSlice>;
+using StructDefPtr = std::shared_ptr<ObjStructDef>;
+using StructInstancePtr = std::shared_ptr<ObjStructInstance>;
 using NativeFn = std::function<Value(int argCount, Value* args, const std::vector<std::string>& argNames)>;
+
+struct StructField {
+    std::string name;
+    bool isConst = false;
+    TypeSpec typeSpec;
+};
+
+struct ObjStructDef {
+    std::string name;
+    std::vector<StructField> fields;
+    std::unordered_map<std::string, size_t> fieldIndices;
+    ModulePtr module = nullptr;
+};
+
+struct ObjStructInstance {
+    StructDefPtr def = nullptr;
+    std::vector<Value> fields;
+};
 
 struct SymbolInfo {
     bool isPublic = false;
@@ -118,20 +142,24 @@ struct Value {
     NativeFn nativeFn;
     ModulePtr module;
     SlicePtr slice;
+    StructDefPtr structDef;
+    StructInstancePtr structInstance;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
     Value(FunctionPtr fn);
     Value(ClosurePtr cl);
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr) {}
-    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr) {}
-    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl) {}
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl), structDef(nullptr), structInstance(nullptr) {}
+    Value(StructDefPtr def) : type(ValueType::STRUCT_DEF), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(def), structInstance(nullptr) {}
+    Value(StructInstancePtr inst) : type(ValueType::STRUCT_INSTANCE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(inst) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -146,6 +174,8 @@ struct Value {
     bool isNative() const { return type == ValueType::NATIVE; }
     bool isModule() const { return type == ValueType::MODULE; }
     bool isSlice() const { return type == ValueType::SLICE; }
+    bool isStructDef() const { return type == ValueType::STRUCT_DEF; }
+    bool isStructInstance() const { return type == ValueType::STRUCT_INSTANCE; }
 
     double asFloat() const {
         if (type == ValueType::INT) return static_cast<double>(intVal);
@@ -156,28 +186,11 @@ struct Value {
     bool isFalsey() const;
 
     bool isEqual(const Value& other) const {
-        if (isInt() && other.isInt()) return intVal == other.intVal;
-        if (isFloat() && other.isFloat()) return floatVal == other.floatVal;
-        if (isNumber() && other.isNumber()) {
-            return asFloat() == other.asFloat();
-        }
-        if (type != other.type) return false;
-        switch (type) {
-            case ValueType::NIL: return true;
-            case ValueType::BOOL: return boolean == other.boolean;
-            case ValueType::INT: return intVal == other.intVal;
-            case ValueType::FLOAT: return floatVal == other.floatVal;
-            case ValueType::CHAR: return charVal == other.charVal;
-            case ValueType::STRING: return str == other.str;
-            case ValueType::FUNCTION: return closure == other.closure;
-            case ValueType::ARRAY: return array == other.array;
-            case ValueType::MAP: return map == other.map;
-            case ValueType::MODULE: return module == other.module;
-            case ValueType::SLICE: return slice == other.slice;
-            case ValueType::NATIVE: return false;
-        }
-        return false;
+        std::vector<std::pair<const void*, const void*>> visited;
+        return isEqualCycleSafe(other, visited);
     }
+
+    bool isEqualCycleSafe(const Value& other, std::vector<std::pair<const void*, const void*>>& visited) const;
 
     std::string toString() const;
     std::string toStringCycleSafe(std::vector<const void*>& visited) const;
@@ -311,12 +324,12 @@ struct ObjClosure {
 };
 
 inline Value::Value(FunctionPtr fn)
-    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(fn), closure(std::make_shared<ObjClosure>()), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {
+    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(fn), closure(std::make_shared<ObjClosure>()), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {
     closure->function = fn;
 }
 
 inline Value::Value(ClosurePtr cl)
-    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(cl ? cl->function : nullptr), closure(cl), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    : type(ValueType::FUNCTION), intVal(0), str(""), boolean(false), function(cl ? cl->function : nullptr), closure(cl), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
 
 inline bool Value::isFalsey() const {
     if (isNil()) return true;
@@ -376,6 +389,7 @@ inline std::string TypeSpec::toString() const {
             return "map";
         case TypeKind::FUNC: return "func";
         case TypeKind::UNTYPED: return "untyped";
+        case TypeKind::STRUCT: return structName.empty() ? "struct" : structName;
     }
     return "any";
 }
@@ -484,6 +498,36 @@ inline std::string Value::toStringCycleSafe(std::vector<const void*>& visited) c
         visited.pop_back();
         return result;
     }
+    if (isStructDef()) {
+        if (structDef && !structDef->name.empty()) {
+            return "<struct " + structDef->name + ">";
+        }
+        return "<struct>";
+    }
+    if (isStructInstance()) {
+        if (!structInstance || !structInstance->def) return "struct{}";
+        const void* ptr = static_cast<const void*>(structInstance.get());
+        if (std::find(visited.begin(), visited.end(), ptr) != visited.end()) {
+            return structInstance->def->name + "{...}";
+        }
+        visited.push_back(ptr);
+        std::string result = structInstance->def->name + "{";
+        for (size_t i = 0; i < structInstance->def->fields.size(); ++i) {
+            if (i > 0) result += ", ";
+            result += structInstance->def->fields[i].name + ": ";
+            Value fVal = (i < structInstance->fields.size()) ? structInstance->fields[i] : Value();
+            if (fVal.isString()) {
+                result += "\"" + fVal.toStringCycleSafe(visited) + "\"";
+            } else if (fVal.isChar()) {
+                result += "'" + fVal.toStringCycleSafe(visited) + "'";
+            } else {
+                result += fVal.toStringCycleSafe(visited);
+            }
+        }
+        result += "}";
+        visited.pop_back();
+        return result;
+    }
     return "nil";
 }
 
@@ -496,5 +540,155 @@ inline TypeSpec Value::getTypeSpec() const {
     if (isArray()) return array ? array->typeSpec : TypeSpec{TypeKind::ARRAY};
     if (isMap()) return map ? map->typeSpec : TypeSpec{TypeKind::MAP};
     if (isFunction() || isNative()) return TypeSpec{TypeKind::FUNC};
+    if (isStructInstance()) {
+        TypeSpec spec;
+        spec.kind = TypeKind::STRUCT;
+        spec.structName = (structInstance && structInstance->def) ? structInstance->def->name : "";
+        return spec;
+    }
+    if (isStructDef()) {
+        TypeSpec spec;
+        spec.kind = TypeKind::STRUCT;
+        spec.structName = structDef ? structDef->name : "";
+        return spec;
+    }
     return TypeSpec{TypeKind::ANY};
+}
+
+inline bool Value::isEqualCycleSafe(const Value& other, std::vector<std::pair<const void*, const void*>>& visited) const {
+    if (isInt() && other.isInt()) return intVal == other.intVal;
+    if (isFloat() && other.isFloat()) return floatVal == other.floatVal;
+    if (isNumber() && other.isNumber()) {
+        return asFloat() == other.asFloat();
+    }
+    if (type != other.type) return false;
+    switch (type) {
+        case ValueType::NIL: return true;
+        case ValueType::BOOL: return boolean == other.boolean;
+        case ValueType::INT: return intVal == other.intVal;
+        case ValueType::FLOAT: return floatVal == other.floatVal;
+        case ValueType::CHAR: return charVal == other.charVal;
+        case ValueType::STRING: return str == other.str;
+        case ValueType::FUNCTION: return closure == other.closure;
+        case ValueType::MODULE: return module == other.module;
+        case ValueType::SLICE: return slice == other.slice;
+        case ValueType::NATIVE: return false;
+        case ValueType::STRUCT_DEF: return structDef == other.structDef;
+        case ValueType::ARRAY: {
+            if (array == other.array) return true;
+            if (!array || !other.array) return false;
+            if (array->size() != other.array->size()) return false;
+            auto pair = std::make_pair(static_cast<const void*>(array.get()), static_cast<const void*>(other.array.get()));
+            if (std::find(visited.begin(), visited.end(), pair) != visited.end()) return true;
+            visited.push_back(pair);
+            for (size_t i = 0; i < array->size(); ++i) {
+                if (!(*array)[i].isEqualCycleSafe((*other.array)[i], visited)) {
+                    visited.pop_back();
+                    return false;
+                }
+            }
+            visited.pop_back();
+            return true;
+        }
+        case ValueType::MAP: {
+            if (map == other.map) return true;
+            if (!map || !other.map) return false;
+            if (map->keys.size() != other.map->keys.size()) return false;
+            auto pair = std::make_pair(static_cast<const void*>(map.get()), static_cast<const void*>(other.map.get()));
+            if (std::find(visited.begin(), visited.end(), pair) != visited.end()) return true;
+            visited.push_back(pair);
+            for (size_t i = 0; i < map->keys.size(); ++i) {
+                const Value& k = map->keys[i];
+                if (!other.map->contains(k)) {
+                    visited.pop_back();
+                    return false;
+                }
+                if (!map->get(k).isEqualCycleSafe(other.map->get(k), visited)) {
+                    visited.pop_back();
+                    return false;
+                }
+            }
+            visited.pop_back();
+            return true;
+        }
+        case ValueType::STRUCT_INSTANCE: {
+            if (structInstance == other.structInstance) return true;
+            if (!structInstance || !other.structInstance) return false;
+            if (!structInstance->def || !other.structInstance->def) return false;
+            if (structInstance->def->name != other.structInstance->def->name) return false;
+            if (structInstance->fields.size() != other.structInstance->fields.size()) return false;
+            auto pair = std::make_pair(static_cast<const void*>(structInstance.get()), static_cast<const void*>(other.structInstance.get()));
+            if (std::find(visited.begin(), visited.end(), pair) != visited.end()) return true;
+            visited.push_back(pair);
+            for (size_t i = 0; i < structInstance->fields.size(); ++i) {
+                if (!structInstance->fields[i].isEqualCycleSafe(other.structInstance->fields[i], visited)) {
+                    visited.pop_back();
+                    return false;
+                }
+            }
+            visited.pop_back();
+            return true;
+        }
+    }
+    return false;
+}
+
+inline Value copyValueCycleSafe(const Value& val, std::unordered_map<const void*, Value>& visited) {
+    if (val.isStructInstance()) {
+        if (!val.structInstance) return val;
+        const void* ptr = static_cast<const void*>(val.structInstance.get());
+        auto it = visited.find(ptr);
+        if (it != visited.end()) return it->second;
+
+        StructInstancePtr newInst = std::make_shared<ObjStructInstance>();
+        newInst->def = val.structInstance->def;
+        Value newVal(newInst);
+        visited[ptr] = newVal;
+
+        newInst->fields.resize(val.structInstance->fields.size());
+        for (size_t i = 0; i < val.structInstance->fields.size(); ++i) {
+            newInst->fields[i] = copyValueCycleSafe(val.structInstance->fields[i], visited);
+        }
+        return newVal;
+    }
+    if (val.isArray()) {
+        if (!val.array) return val;
+        const void* ptr = static_cast<const void*>(val.array.get());
+        auto it = visited.find(ptr);
+        if (it != visited.end()) return it->second;
+
+        ArrayPtr newArr = std::make_shared<ObjArray>();
+        newArr->typeSpec = val.array->typeSpec;
+        Value newVal(newArr);
+        visited[ptr] = newVal;
+
+        for (size_t i = 0; i < val.array->elements.size(); ++i) {
+            newArr->push_back(copyValueCycleSafe(val.array->elements[i], visited));
+        }
+        return newVal;
+    }
+    if (val.isMap()) {
+        if (!val.map) return val;
+        const void* ptr = static_cast<const void*>(val.map.get());
+        auto it = visited.find(ptr);
+        if (it != visited.end()) return it->second;
+
+        MapPtr newMap = std::make_shared<ObjMap>();
+        newMap->typeSpec = val.map->typeSpec;
+        Value newVal(newMap);
+        visited[ptr] = newVal;
+
+        for (size_t i = 0; i < val.map->keys.size(); ++i) {
+            Value kCopy = copyValueCycleSafe(val.map->keys[i], visited);
+            Value vCopy = copyValueCycleSafe(val.map->get(val.map->keys[i]), visited);
+            newMap->set(kCopy, vCopy);
+        }
+        return newVal;
+    }
+    return val;
+}
+
+inline Value copyValue(const Value& val) {
+    std::unordered_map<const void*, Value> visited;
+    return copyValueCycleSafe(val, visited);
 }

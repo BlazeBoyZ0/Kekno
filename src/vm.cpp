@@ -320,12 +320,15 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
     if (argNames.empty() && posCount == totalDeclared) {
         for (size_t i = 0; i < function->paramTypes.size(); i++) {
             TypeSpec expected = function->paramTypes[i];
-            if (expected.kind == TypeKind::ANY || expected.kind == TypeKind::UNTYPED) continue;
-
-            if (!checkAndCoerceValueType(expected, stack[stack.size() - argCount + i])) {
-                runtimeError(nameStr + "argument " + std::to_string(i + 1) + " expects type " +
-                             expected.toString() + " but got " + stack[stack.size() - argCount + i].getTypeSpec().toString() + ".");
-                return false;
+            if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
+                if (!checkAndCoerceValueType(expected, stack[stack.size() - argCount + i])) {
+                    runtimeError(nameStr + "argument " + std::to_string(i + 1) + " expects type " +
+                                 expected.toString() + " but got " + stack[stack.size() - argCount + i].getTypeSpec().toString() + ".");
+                    return false;
+                }
+            }
+            if (stack[stack.size() - argCount + i].isStructInstance()) {
+                stack[stack.size() - argCount + i] = copyValue(stack[stack.size() - argCount + i]);
             }
         }
 
@@ -402,7 +405,9 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
 
     stack.resize(stackArgsStart);
     for (int i = 0; i < totalDeclared; ++i) {
-        stack.push_back(finalArgs[i]);
+        Value argVal = finalArgs[i];
+        if (argVal.isStructInstance()) argVal = copyValue(argVal);
+        stack.push_back(argVal);
     }
 
     CallFrame frame;
@@ -542,9 +547,87 @@ static TypeSpec parseTypeSpecString(const std::string& str) {
     return TypeSpec{TypeKind::ANY};
 }
 
+static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val);
+
+static bool constructStructInstance(StructDefPtr def, int argCount, const std::vector<std::string>& argNames,
+                                    std::vector<Value>& stack, Value& result, std::string& errorMsg) {
+    int namedCount = static_cast<int>(argNames.size());
+    int posCount = argCount - namedCount;
+
+    if (posCount < 0) {
+        errorMsg = "Invalid argument count for struct '" + def->name + "' construction.";
+        return false;
+    }
+
+    if (posCount > static_cast<int>(def->fields.size())) {
+        errorMsg = "Too many positional arguments provided for struct '" + def->name + "'.";
+        return false;
+    }
+
+    StructInstancePtr inst = std::make_shared<ObjStructInstance>();
+    inst->def = def;
+    inst->fields.resize(def->fields.size(), Value()); // default nil for omitted fields
+
+    std::vector<bool> provided(def->fields.size(), false);
+    size_t stackArgsStart = stack.size() - argCount;
+
+    // Positional arguments
+    for (int i = 0; i < posCount; ++i) {
+        Value val = stack[stackArgsStart + i];
+        const StructField& f = def->fields[i];
+        if (f.typeSpec.kind != TypeKind::ANY && f.typeSpec.kind != TypeKind::UNTYPED) {
+            if (!checkAndCoerceValueType(f.typeSpec, val)) {
+                errorMsg = "Field '" + f.name + "' in struct '" + def->name + "' expects type " +
+                           f.typeSpec.toString() + " but got " + val.getTypeSpec().toString() + ".";
+                return false;
+            }
+        }
+        inst->fields[i] = copyValue(val);
+        provided[i] = true;
+    }
+
+    // Named arguments
+    for (int k = 0; k < namedCount; ++k) {
+        const std::string& name = argNames[k];
+        auto it = def->fieldIndices.find(name);
+        if (it == def->fieldIndices.end()) {
+            errorMsg = "Struct '" + def->name + "' has no field named '" + name + "'.";
+            return false;
+        }
+        size_t idx = it->second;
+        if (provided[idx]) {
+            errorMsg = "Duplicate argument '" + name + "' provided for struct '" + def->name + "'.";
+            return false;
+        }
+        Value val = stack[stackArgsStart + posCount + k];
+        const StructField& f = def->fields[idx];
+        if (f.typeSpec.kind != TypeKind::ANY && f.typeSpec.kind != TypeKind::UNTYPED) {
+            if (!checkAndCoerceValueType(f.typeSpec, val)) {
+                errorMsg = "Field '" + f.name + "' in struct '" + def->name + "' expects type " +
+                           f.typeSpec.toString() + " but got " + val.getTypeSpec().toString() + ".";
+                return false;
+            }
+        }
+        inst->fields[idx] = copyValue(val);
+        provided[idx] = true;
+    }
+
+    result = Value(inst);
+    return true;
+}
+
 static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     if (expected.kind == TypeKind::ANY || expected.kind == TypeKind::UNTYPED) {
         return true;
+    }
+    if (expected.kind == TypeKind::STRUCT) {
+        if (val.isNil()) return true;
+        if (val.isStructInstance() && val.structInstance && val.structInstance->def) {
+            if (expected.structName.empty() || val.structInstance->def->name == expected.structName) {
+                return true;
+            }
+        }
+        return false;
     }
     if (expected.kind == TypeKind::INT) {
         if (val.isInt()) return true;
@@ -847,6 +930,8 @@ VM::VM() {
             case ValueType::MODULE: return Value(std::string("module"));
             case ValueType::NIL: return Value(std::string("nil"));
             case ValueType::SLICE: return Value(std::string("slice"));
+            case ValueType::STRUCT_DEF: return Value(std::string("struct"));
+            case ValueType::STRUCT_INSTANCE: return Value(val.structInstance && val.structInstance->def ? val.structInstance->def->name : std::string("struct"));
         }
         return Value(std::string("nil"));
     });
@@ -1063,6 +1148,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 if (val.closure) val.closure->module = frame.closure->module;
                 if (val.function) val.function->module = frame.closure->module;
             }
+            if (val.isStructInstance()) val = copyValue(val);
             frame.closure->module->globals[name] = val;
             frame.closure->module->symbols[name] = SymbolInfo{isPublic, isConst, TypeSpec{TypeKind::ANY}};
             break;
@@ -1086,6 +1172,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 if (val.closure) val.closure->module = frame.closure->module;
                 if (val.function) val.function->module = frame.closure->module;
             }
+            if (val.isStructInstance()) val = copyValue(val);
             frame.closure->module->globals[name] = val;
             frame.closure->module->symbols[name] = SymbolInfo{isPublic, isConst, expected};
             break;
@@ -1133,19 +1220,18 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 }
                 return false;
             }
+            Value val = peek(0);
             if (symIt != mod->symbols.end() && symIt->second.typeSpec.kind != TypeKind::ANY && symIt->second.typeSpec.kind != TypeKind::UNTYPED) {
                 TypeSpec expected = symIt->second.typeSpec;
-                Value val = peek(0);
                 if (!checkAndCoerceValueType(expected, val)) {
                     std::cout << "[Runtime Error]: Type mismatch for variable '" << name
                               << "': expected " << expected.toString() << " but got "
                               << val.getTypeSpec().toString() << "." << std::endl;
                     return false;
                 }
-                it->second = val;
-            } else {
-                it->second = peek(0);
             }
+            if (val.isStructInstance()) val = copyValue(val);
+            it->second = val;
             break;
         }
         case OpCode::OP_GET_LOCAL: {
@@ -1155,21 +1241,20 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         }
         case OpCode::OP_SET_LOCAL: {
             uint16_t slot = read16(frame.ip);
+            Value val = peek(0);
             if (slot < frame.closure->function->localTypes.size()) {
                 TypeSpec expected = frame.closure->function->localTypes[slot];
                 if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
-                    Value val = peek(0);
                     if (!checkAndCoerceValueType(expected, val)) {
                         std::cout << "[Runtime Error]: Type mismatch for local variable: expected "
                                   << expected.toString() << " but got "
                                   << val.getTypeSpec().toString() << "." << std::endl;
                         return false;
                     }
-                    stack[frame.slotsOffset + slot] = val;
-                    break;
                 }
             }
-            stack[frame.slotsOffset + slot] = peek(0);
+            if (val.isStructInstance()) val = copyValue(val);
+            stack[frame.slotsOffset + slot] = val;
             break;
         }
         case OpCode::OP_GET_UPVALUE: {
@@ -1189,6 +1274,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return false;
                 }
             }
+            if (val.isStructInstance()) val = copyValue(val);
             *upvalue->getValuePtr(stack) = val;
             break;
         }
@@ -1260,7 +1346,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 if (!call(callee.closure, argCount, emptyNames)) {
                     return false;
                 }
-
+            } else if (callee.isStructDef()) {
+                Value instVal;
+                std::string errMsg;
+                if (!constructStructInstance(callee.structDef, argCount, emptyNames, stack, instVal, errMsg)) {
+                    runtimeError(errMsg);
+                    return false;
+                }
+                stack.resize(stack.size() - argCount - 1);
+                push(instVal);
             } else if (callee.isNative()) {
                 try {
                     Value* args = &stack[stack.size() - argCount];
@@ -1288,7 +1382,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value callee = peek(argCount);
             if (callee.isFunction()) {
                 if (!call(callee.closure, argCount, argNames)) return false;
-
+            } else if (callee.isStructDef()) {
+                Value instVal;
+                std::string errMsg;
+                if (!constructStructInstance(callee.structDef, argCount, argNames, stack, instVal, errMsg)) {
+                    runtimeError(errMsg);
+                    return false;
+                }
+                stack.resize(stack.size() - argCount - 1);
+                push(instVal);
             } else if (callee.isNative()) {
                 try {
                     Value* args = &stack[stack.size() - argCount];
@@ -1341,7 +1443,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             std::vector<std::string> emptyNames;
             if (callee.isFunction()) {
                 if (!call(callee.closure, totalArgCount, emptyNames)) return false;
-
+            } else if (callee.isStructDef()) {
+                Value instVal;
+                std::string errMsg;
+                if (!constructStructInstance(callee.structDef, totalArgCount, emptyNames, stack, instVal, errMsg)) {
+                    runtimeError(errMsg);
+                    return false;
+                }
+                stack.resize(stack.size() - totalArgCount - 1);
+                push(instVal);
             } else if (callee.isNative()) {
                 try {
                     Value* args = &stack[stack.size() - totalArgCount];
@@ -1383,7 +1493,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value callee = peek(totalArgCount);
             if (callee.isFunction()) {
                 if (!call(callee.closure, totalArgCount, argNames)) return false;
-
+            } else if (callee.isStructDef()) {
+                Value instVal;
+                std::string errMsg;
+                if (!constructStructInstance(callee.structDef, totalArgCount, argNames, stack, instVal, errMsg)) {
+                    runtimeError(errMsg);
+                    return false;
+                }
+                stack.resize(stack.size() - totalArgCount - 1);
+                push(instVal);
             } else if (callee.isNative()) {
                 try {
                     Value* args = &stack[stack.size() - totalArgCount];
@@ -1421,6 +1539,20 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             uint16_t nameIdx = read16(frame.ip);
             std::string memberName = frame.closure->function->chunk.constants[nameIdx].str;
             Value target = pop();
+
+            if (target.isStructInstance()) {
+                if (!target.structInstance || !target.structInstance->def) {
+                    runtimeError("Invalid struct target.");
+                    return false;
+                }
+                auto it = target.structInstance->def->fieldIndices.find(memberName);
+                if (it == target.structInstance->def->fieldIndices.end()) {
+                    std::cout << "[Runtime Error]: Struct '" << target.structInstance->def->name << "' has no field '" << memberName << "'." << std::endl;
+                    return false;
+                }
+                push(target.structInstance->fields[it->second]);
+                break;
+            }
 
             if (target.isModule() && target.module) {
                 ModulePtr mod = target.module;
@@ -2130,6 +2262,33 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value val = pop();
             Value target = pop();
 
+            if (target.isStructInstance()) {
+                if (!target.structInstance || !target.structInstance->def) {
+                    runtimeError("Invalid struct target.");
+                    return false;
+                }
+                auto it = target.structInstance->def->fieldIndices.find(memberName);
+                if (it == target.structInstance->def->fieldIndices.end()) {
+                    std::cout << "[Runtime Error]: Struct '" << target.structInstance->def->name << "' has no field '" << memberName << "'." << std::endl;
+                    return false;
+                }
+                size_t idx = it->second;
+                const StructField& f = target.structInstance->def->fields[idx];
+                if (f.isConst) {
+                    std::cout << "[Runtime Error]: Cannot reassign const field '" << memberName << "' in struct '" << target.structInstance->def->name << "'." << std::endl;
+                    return false;
+                }
+                if (f.typeSpec.kind != TypeKind::ANY && f.typeSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(f.typeSpec, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for field '" << memberName << "' in struct '" << target.structInstance->def->name << "': expected " << f.typeSpec.toString() << " but got " << val.getTypeSpec().toString() << "." << std::endl;
+                        return false;
+                    }
+                }
+                target.structInstance->fields[idx] = val;
+                push(val);
+                break;
+            }
+
             if (!target.isModule() || !target.module) {
                 std::cout << "[Member Error]: Cannot set member '" << memberName << "' on non-module value." << std::endl;
                 return false;
@@ -2168,6 +2327,34 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             std::string memberName = frame.closure->function->chunk.constants[nameIdx].str;
             Value val = pop();
             Value target = pop();
+
+            if (target.isStructInstance()) {
+                if (!target.structInstance || !target.structInstance->def) {
+                    runtimeError("Invalid struct target.");
+                    return false;
+                }
+                auto it = target.structInstance->def->fieldIndices.find(memberName);
+                if (it == target.structInstance->def->fieldIndices.end()) {
+                    std::cout << "[Runtime Error]: Struct '" << target.structInstance->def->name << "' has no field '" << memberName << "'." << std::endl;
+                    return false;
+                }
+                size_t idx = it->second;
+                const StructField& f = target.structInstance->def->fields[idx];
+                if (f.isConst) {
+                    std::cout << "[Runtime Error]: Cannot reassign const field '" << memberName << "' in struct '" << target.structInstance->def->name << "'." << std::endl;
+                    return false;
+                }
+                if (f.typeSpec.kind != TypeKind::ANY && f.typeSpec.kind != TypeKind::UNTYPED) {
+                    if (!checkAndCoerceValueType(f.typeSpec, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for field '" << memberName << "' in struct '" << target.structInstance->def->name << "': expected " << f.typeSpec.toString() << " but got " << val.getTypeSpec().toString() << "." << std::endl;
+                        return false;
+                    }
+                }
+                Value oldVal = target.structInstance->fields[idx];
+                target.structInstance->fields[idx] = val;
+                push(oldVal);
+                break;
+            }
 
             if (!target.isModule() || !target.module) {
                 std::cout << "[Member Error]: Cannot set member '" << memberName << "' on non-module value." << std::endl;
@@ -2208,6 +2395,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value val = pop();
             Value indexVal = pop();
             Value target = pop();
+
+            if (val.isStructInstance()) val = copyValue(val);
 
             if (target.isMap()) {
                 if (!ObjMap::isSupportedKey(indexVal)) {
@@ -2273,7 +2462,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             ArrayPtr arr = std::make_shared<ObjArray>();
             arr->resize(elementCount);
             for (int i = elementCount - 1; i >= 0; --i) {
-                (*arr)[i] = pop();
+                Value elem = pop();
+                if (elem.isStructInstance()) elem = copyValue(elem);
+                (*arr)[i] = elem;
             }
             push(Value(arr));
             break;
@@ -2289,6 +2480,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     std::cout << "[Runtime Error]: Map key must be a supported scalar type." << std::endl;
                     return false;
                 }
+                if (val.isStructInstance()) val = copyValue(val);
+                if (keyVal.isStructInstance()) keyVal = copyValue(keyVal);
                 entries[i] = {keyVal, val};
             }
             for (int i = 0; i < entryCount; ++i) {
@@ -2356,6 +2549,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value val = pop();
             Value indexVal = pop();
             Value target = pop();
+
+            if (val.isStructInstance()) val = copyValue(val);
 
             if (target.isMap()) {
                 if (!ObjMap::isSupportedKey(indexVal)) {
@@ -2755,6 +2950,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         }
         case OpCode::OP_RETURN: {
             Value result = pop();
+            if (result.isStructInstance()) result = copyValue(result);
             closeUpvalues(frame.slotsOffset);
             size_t slotsOffset = frame.slotsOffset;
             bool wasGrab = frame.isGrab;
