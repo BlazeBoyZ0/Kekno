@@ -347,6 +347,10 @@ TypeSpec Compiler::parseTypeDeclaration() {
             spec.valType = std::make_shared<TypeSpec>(vSpec);
             consume(TokenType::GREATER, "Expected '>' after map value type");
         }
+    } else if (current.type == TokenType::IDENTIFIER) {
+        spec.kind = TypeKind::STRUCT;
+        spec.structName = current.text;
+        advance();
     }
     return spec;
 }
@@ -489,7 +493,8 @@ void Compiler::primary() {
                     if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
                         current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
                         current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-                        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
+                        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC ||
+                        (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER)) {
                         pSpec = parseTypeDeclaration();
                     }
                     fn->paramTypes.push_back(pSpec);
@@ -865,7 +870,8 @@ void Compiler::varDeclaration(bool isPublic) {
     if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
         current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
         current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
+        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC ||
+        (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER)) {
         typeSpec = parseTypeDeclaration();
     }
 
@@ -969,7 +975,8 @@ void Compiler::taskDeclaration(bool isPublic) {
                 if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
                     current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
                     current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-                    current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
+                    current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC ||
+                    (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER)) {
                     pSpec = parseTypeDeclaration();
                 }
                 fn->paramTypes.push_back(pSpec);
@@ -1212,6 +1219,80 @@ void Compiler::grabStatement() {
     chunk().write16(aliasIdx);
 }
 
+void Compiler::structDeclaration(bool isPublic) {
+    advance(); // consume 'build'
+    if (current.type != TokenType::IDENTIFIER) {
+        errorAt(current, "Expected struct name after 'build'", "Syntax Error");
+        return;
+    }
+    std::string structName = current.text;
+    advance();
+
+    StructDefPtr structDef = std::make_shared<ObjStructDef>();
+    structDef->name = structName;
+
+    consume(TokenType::LBRACE, "Expected '{' after struct name");
+
+    while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+        bool isConst = match(TokenType::CONST);
+        if (!isConst) {
+            if (!match(TokenType::LET)) {
+                errorAt(current, "Expected 'let' or 'const' in field declaration", "Syntax Error");
+                return;
+            }
+        }
+
+        if (current.type != TokenType::IDENTIFIER) {
+            errorAt(current, "Expected field name", "Syntax Error");
+            return;
+        }
+        std::string fieldName = current.text;
+        advance();
+
+        if (structDef->fieldIndices.find(fieldName) != structDef->fieldIndices.end()) {
+            error("Duplicate field name '" + fieldName + "' in struct '" + structName + "'.", "Compiler Error");
+            return;
+        }
+
+        TypeSpec fieldType{TypeKind::ANY};
+        if (match(TokenType::COLON)) {
+            fieldType = parseTypeDeclaration();
+        }
+
+        match(TokenType::TILDE); // optional '~' after field declaration
+
+        StructField field;
+        field.name = fieldName;
+        field.isConst = isConst;
+        field.typeSpec = fieldType;
+
+        size_t idx = structDef->fields.size();
+        structDef->fields.push_back(field);
+        structDef->fieldIndices[fieldName] = idx;
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after struct body");
+    consume(TokenType::TILDE, "Every statement must end with '~'");
+
+    if (hasError) return;
+
+    if (currentContext->scopeDepth > 0) {
+        addLocal(structName, true, TypeSpec{TypeKind::STRUCT, TypeKind::ANY, TypeKind::ANY, TypeKind::ANY, structName});
+    }
+
+    uint16_t constIdx = addConstant(Value(structDef));
+    chunk().writeOp(OpCode::OP_CONSTANT);
+    chunk().write16(constIdx);
+
+    if (currentContext->scopeDepth == 0) {
+        uint16_t nameIdx = addConstant(Value(structName));
+        uint8_t flags = (isPublic ? 1 : 0) | 2; // isConst = true
+        chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
+        chunk().write16(nameIdx);
+        chunk().writeByte(flags);
+    }
+}
+
 void Compiler::statement() {
     if (hasError) return;
     if (current.type == TokenType::PUB || current.type == TokenType::PRIV) {
@@ -1226,13 +1307,17 @@ void Compiler::statement() {
             varDeclaration(isPublic);
         } else if (current.type == TokenType::TASK) {
             taskDeclaration(isPublic);
+        } else if (current.type == TokenType::BUILD) {
+            structDeclaration(isPublic);
         } else {
-            errorAt(current, "Expected variable or task declaration after '" + modName + "' modifier.", "Syntax Error");
+            errorAt(current, "Expected variable, task, or struct declaration after '" + modName + "' modifier.", "Syntax Error");
         }
     } else if (current.type == TokenType::LET || current.type == TokenType::CONST) {
         varDeclaration(false);
     } else if (current.type == TokenType::TASK) {
         taskDeclaration(false);
+    } else if (current.type == TokenType::BUILD) {
+        structDeclaration(false);
     } else if (current.type == TokenType::GIVE) {
         giveStatement();
     } else if (current.type == TokenType::HALT) {

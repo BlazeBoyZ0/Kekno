@@ -1162,8 +1162,200 @@ static void testV059RegressionSuite() {
     }
 }
 
+static void testV060StructFoundation() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Basic build declaration, positional construction, string representation
+    std::string code1 =
+        "build Person {\n"
+        "    const name : string\n"
+        "    let age : int\n"
+        "}~\n"
+        "let p = Person(\"BBZ\", 15)~\n"
+        "echo p~\n";
+    out = runCodeFresh(code1, ok);
+    TEST_ASSERT(ok && out.find("Person{name: \"BBZ\", age: 15}") != std::string::npos, "struct build, construction, and string representation");
+
+    // 2. Named and mixed argument construction
+    std::string code2 =
+        "build Person {\n"
+        "    const name : string\n"
+        "    let age : int\n"
+        "}~\n"
+        "let p1 = Person(age = 20, name = \"Alice\")~\n"
+        "let p2 = Person(\"Bob\", age = 30)~\n"
+        "echo p1~\n"
+        "echo p2~\n";
+    out = runCodeFresh(code2, ok);
+    TEST_ASSERT(ok && out.find("Person{name: \"Alice\", age: 20}") != std::string::npos &&
+                out.find("Person{name: \"Bob\", age: 30}") != std::string::npos, "named and mixed argument construction");
+
+    // 3. Omitted fields defaulting to nil and zero-field structs
+    std::string code3 =
+        "build Person {\n"
+        "    const name : string\n"
+        "    let age : int\n"
+        "}~\n"
+        "build Empty {}~\n"
+        "let p = Person(\"Charlie\")~\n"
+        "let e = Empty()~\n"
+        "echo p~\n"
+        "echo e~\n";
+    out = runCodeFresh(code3, ok);
+    TEST_ASSERT(ok && out.find("Person{name: \"Charlie\", age: nil}") != std::string::npos &&
+                out.find("Empty{}") != std::string::npos, "omitted fields defaulting to nil and zero-field structs");
+
+    // 4. Field access and field assignment
+    std::string code4 =
+        "build Person {\n"
+        "    const name : string\n"
+        "    let age : int\n"
+        "}~\n"
+        "let p = Person(\"Dave\", 25)~\n"
+        "p.age = 26~\n"
+        "echo p.name~\n"
+        "echo p.age~\n";
+    out = runCodeFresh(code4, ok);
+    TEST_ASSERT(ok && out.find("=> Dave") != std::string::npos && out.find("=> 26") != std::string::npos, "field access and assignment with dot");
+
+    // 5. Errors for missing / invalid fields
+    out = runCodeFresh("build Person { const name : string }~ let p = Person(\"Dave\")~ echo p.missing~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("has no field 'missing'") != std::string::npos, "missing field read error");
+
+    out = runCodeFresh("build Person { const name : string }~ let p = Person(\"Dave\")~ p.missing = 123~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("has no field 'missing'") != std::string::npos, "missing field write error");
+
+    out = runCodeFresh("build Person { const name : string }~ Person(invalid = 123)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("has no field named 'invalid'") != std::string::npos, "construction invalid field error");
+
+    // 6. Field type checking and int->float compatibility rules
+    std::string code6 =
+        "build Measurement {\n"
+        "    let temp : float\n"
+        "}~\n"
+        "let m = Measurement(25)~\n"
+        "echo m.temp~\n";
+    out = runCodeFresh(code6, ok);
+    TEST_ASSERT(ok && out.find("=> 25.0") != std::string::npos, "int to float coercion on struct field");
+
+    out = runCodeFresh("build Measurement { let temp : float }~ let m = Measurement(25)~ m.temp = \"cold\"~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Type mismatch for field 'temp'") != std::string::npos, "field type mismatch error");
+
+    // 7. Const fields immutability
+    out = runCodeFresh("build Person { const name : string let age : int }~ let p = Person(\"Eve\", 30)~ p.name = \"Eve2\"~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Cannot reassign const field 'name'") != std::string::npos, "const field reassignment error");
+
+    // 8. Whole-struct const variables
+    out = runCodeFresh("build Person { const name : string let age : int }~ const p = Person(\"Eve\", 30)~ p = Person(\"Other\", 20)~", ok);
+    TEST_ASSERT(!ok && out.find("Cannot reassign constant variable 'p'") != std::string::npos, "const variable struct reassignment compiler error");
+
+    // 9. Nested structs
+    std::string code9 =
+        "build Point { let x : int let y : int }~\n"
+        "build Rect { let topLeft : Point let width : int }~\n"
+        "let r = Rect(Point(10, 20), 100)~\n"
+        "echo r~\n"
+        "echo r.topLeft.x~\n";
+    out = runCodeFresh(code9, ok);
+    TEST_ASSERT(ok && out.find("Rect{topLeft: Point{x: 10, y: 20}, width: 100}") != std::string::npos &&
+                out.find("=> 10") != std::string::npos, "nested struct construction and access");
+
+    // 10. Recursive struct definitions (Node)
+    std::string code10 =
+        "build Node {\n"
+        "    let value : int\n"
+        "    let next : Node\n"
+        "}~\n"
+        "let n2 = Node(20, nil)~\n"
+        "let n1 = Node(10, n2)~\n"
+        "echo n1~\n";
+    out = runCodeFresh(code10, ok);
+    TEST_ASSERT(ok && out.find("Node{value: 10, next: Node{value: 20, next: nil}}") != std::string::npos, "recursive struct definition Node");
+
+    // 11. Independent value semantics and deep copying
+    std::string code11 =
+        "build Person { const name : string let age : int }~\n"
+        "let p1 = Person(\"BBZ\", 15)~\n"
+        "let p2 = p1~\n"
+        "p2.age = 20~\n"
+        "echo p1.age~\n"
+        "echo p2.age~\n";
+    out = runCodeFresh(code11, ok);
+    TEST_ASSERT(ok && out.find("=> 15\n=> 20") != std::string::npos, "independent value semantics on assignment");
+
+    // 12. Deep copying of nested mutable values (collections & nested structs)
+    std::string code12 =
+        "build Container { let items : array }~\n"
+        "let c1 = Container([1, 2])~\n"
+        "let c2 = c1~\n"
+        "c2.items.push(3)~\n"
+        "echo c1.items~\n"
+        "echo c2.items~\n";
+    out = runCodeFresh(code12, ok);
+    TEST_ASSERT(ok && out.find("[1, 2]") != std::string::npos && out.find("[1, 2, 3]") != std::string::npos, "deep copying of nested mutable collections");
+
+    // 13. Parameter passing & return independent value semantics
+    std::string code13 =
+        "build Person { const name : string let age : int }~\n"
+        "task mutatePerson(Person p) {\n"
+        "    p.age = 99~\n"
+        "    give p~\n"
+        "}\n"
+        "let original = Person(\"Original\", 10)~\n"
+        "let mutated = mutatePerson(original)~\n"
+        "echo original.age~\n"
+        "echo mutated.age~\n";
+    out = runCodeFresh(code13, ok);
+    TEST_ASSERT(ok && out.find("=> 10\n=> 99") != std::string::npos, "parameter passing and return independent value semantics");
+
+    // 14. Value-based / field-by-field equality
+    std::string code14 =
+        "build Point { let x : int let y : int }~\n"
+        "let p1 = Point(1, 2)~\n"
+        "let p2 = Point(1, 2)~\n"
+        "let p3 = Point(1, 3)~\n"
+        "echo (p1 == p2)~\n"
+        "echo (p1 == p3)~\n";
+    out = runCodeFresh(code14, ok);
+    TEST_ASSERT(ok && out.find("=> true\n=> false") != std::string::npos, "field-by-field struct equality");
+
+    // 15. Cycle-safe deep copy, equality, and string formatting
+    std::string code15 =
+        "build Node {\n"
+        "    let value : int\n"
+        "    let next : Node\n"
+        "}~\n"
+        "let na = Node(1, nil)~\n"
+        "na.next = na~\n"
+        "echo na~\n"
+        "let nb = Node(1, nil)~\n"
+        "nb.next = nb~\n"
+        "echo (na == nb)~\n"
+        "let nc = na~\n"
+        "nc.value = 99~\n"
+        "echo na.value~\n"
+        "echo nc.value~\n"
+        "echo nc.next.value~\n";
+    out = runCodeFresh(code15, ok);
+    TEST_ASSERT(ok && out.find("Node{value: 1, next: Node{...}}") != std::string::npos &&
+                out.find("=> true") != std::string::npos &&
+                out.find("=> 1\n=> 99\n=> 99") != std::string::npos, "cycle-safe string formatting, equality, and deep copy");
+
+    // 16. Module exports and imports
+    fs::create_directories("test_struct_mods");
+    {
+        std::ofstream f("test_struct_mods/models.kek");
+        f << "pub build Person { let name : string let age : int }~\n";
+        f.close();
+    }
+    out = runCodeFresh("grab models as m~\n let p = m.Person(\"ModUser\", 40)~\n echo p~\n", ok, "test_struct_mods/main.kek");
+    TEST_ASSERT(ok && out.find("Person{name: \"ModUser\", age: 40}") != std::string::npos, "module export and import of build struct");
+    fs::remove_all("test_struct_mods");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.5.9 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.6.0 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -1189,6 +1381,7 @@ int main() {
     testV056RegressionSuite();
     testV058NewFeaturesAndIntegrations();
     testV059RegressionSuite();
+    testV060StructFoundation();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

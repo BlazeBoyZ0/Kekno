@@ -99,6 +99,7 @@ private:
 
     void varDeclaration(bool isPublic = false);
     void taskDeclaration(bool isPublic = false);
+    void structDeclaration(bool isPublic = false);
     void giveStatement();
     void blockStatement();
     void ifStatement();

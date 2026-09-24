@@ -333,6 +333,7 @@ Token Lexer::nextToken() {
         else if (ident == "for") t.type = TokenType::FOR;
         else if (ident == "task") t.type = TokenType::TASK;
         else if (ident == "give") t.type = TokenType::GIVE;
+        else if (ident == "build") t.type = TokenType::BUILD;
         else if (ident == "halt") t.type = TokenType::HALT;
         else if (ident == "skip") t.type = TokenType::SKIP;
         else if (ident == "grab") t.type = TokenType::GRAB;
