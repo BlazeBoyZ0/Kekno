@@ -339,6 +339,9 @@ Token Lexer::nextToken() {
         else if (ident == "as") t.type = TokenType::AS;
         else if (ident == "pub") t.type = TokenType::PUB;
         else if (ident == "priv") t.type = TokenType::PRIV;
+        else if (ident == "build") t.type = TokenType::BUILD;
+        else if (ident == "operator") t.type = TokenType::OPERATOR;
+        else if (ident == "self") t.type = TokenType::SELF;
         else if (ident == "int") t.type = TokenType::TYPE_INT;
         else if (ident == "float") t.type = TokenType::TYPE_FLOAT;
         else if (ident == "string") t.type = TokenType::TYPE_STRING;

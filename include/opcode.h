@@ -53,5 +53,11 @@ enum class OpCode : uint8_t {
     OP_POP,
     OP_DUP,
     OP_DUP_2,
+    OP_STRUCT_DEF,
+    OP_UNARY_MINUS,
+    OP_UNARY_PLUS,
+    OP_NOT_EQUAL,
+    OP_GREATER_EQUAL,
+    OP_LESS_EQUAL,
     OP_RETURN
 };

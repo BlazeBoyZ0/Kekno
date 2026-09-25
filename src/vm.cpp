@@ -307,6 +307,14 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
         return false;
     }
 
+    for (int i = 0; i < argCount; ++i) {
+        size_t idx = stack.size() - argCount + i;
+        bool isSelf = (i == 0 && function && !function->paramNames.empty() && function->paramNames[0] == "self");
+        if (!isSelf) {
+            stack[idx] = cloneValue(stack[idx]);
+        }
+    }
+
     int totalDeclared = function->arity;
     int namedCount = static_cast<int>(argNames.size());
     int posCount = argCount - namedCount;
@@ -412,6 +420,47 @@ bool VM::call(ClosurePtr closure, int argCount, const std::vector<std::string>& 
     frame.isGrab = isGrab;
     frames.push_back(frame);
     return true;
+}
+
+bool VM::callOperatorOverload(const std::string& opSymbol, const Value& receiver, const Value& rightArg, bool isUnary) {
+    if (!receiver.isStruct() || !receiver.structInstance || !receiver.structInstance->def) return false;
+    StructDefPtr sDef = receiver.structInstance->def;
+
+    FunctionPtr matchedFn = nullptr;
+    for (const auto& op : sDef->operators) {
+        if (op.opName == opSymbol && op.isUnary == isUnary) {
+            if (isUnary) {
+                matchedFn = op.function;
+                break;
+            } else {
+                Value tempRight = rightArg;
+                if (checkAndCoerceValueType(op.rightType, tempRight)) {
+                    matchedFn = op.function;
+                    break;
+                } else if (!matchedFn) {
+                    matchedFn = op.function;
+                }
+            }
+        }
+    }
+
+    if (!matchedFn) return false;
+
+    ClosurePtr closure = std::make_shared<ObjClosure>();
+    closure->function = matchedFn;
+    closure->module = sDef->module;
+
+    std::vector<std::string> emptyNames;
+    if (isUnary) {
+        push(Value(closure));
+        push(receiver);
+        return call(closure, 1, emptyNames);
+    } else {
+        push(Value(closure));
+        push(receiver);
+        push(rightArg);
+        return call(closure, 2, emptyNames);
+    }
 }
 
 Value VM::runCallback(Value cb, const std::vector<Value>& availableArgs, int maxAllowedParams) {
@@ -539,7 +588,10 @@ static TypeSpec parseTypeSpecString(const std::string& str) {
             return spec;
         }
     }
-    return TypeSpec{TypeKind::ANY};
+    TypeSpec spec;
+    spec.kind = TypeKind::STRUCT;
+    spec.structName = str;
+    return spec;
 }
 
 static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
@@ -577,6 +629,12 @@ static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val) {
     }
     if (expected.kind == TypeKind::FUNC) {
         return val.isFunction() || val.isNative();
+    }
+    if (expected.kind == TypeKind::STRUCT) {
+        if (!val.isStruct()) return false;
+        if (!val.structInstance || !val.structInstance->def) return false;
+        if (!expected.structName.empty() && val.structInstance->def->name != expected.structName) return false;
+        return true;
     }
     if (expected.kind == TypeKind::ARRAY) {
         if (!val.isArray()) return false;
@@ -847,6 +905,9 @@ VM::VM() {
             case ValueType::MODULE: return Value(std::string("module"));
             case ValueType::NIL: return Value(std::string("nil"));
             case ValueType::SLICE: return Value(std::string("slice"));
+            case ValueType::STRUCT: return Value(val.structInstance && val.structInstance->def ? val.structInstance->def->name : std::string("struct"));
+            case ValueType::BOUND_METHOD: return Value(std::string("func"));
+            case ValueType::STRUCT_DEF: return Value(std::string("struct_def"));
         }
         return Value(std::string("nil"));
     });
@@ -1035,6 +1096,25 @@ VM::VM() {
 
 bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
     switch (instruction) {
+        case OpCode::OP_STRUCT_DEF: {
+            uint16_t index = read16(frame.ip);
+            Value val = frame.closure->function->chunk.constants[index];
+            if (val.isStructDef() && val.structDef) {
+                val.structDef->module = frame.closure->module;
+                for (auto& pair : val.structDef->methods) {
+                    if (pair.second.function) {
+                        pair.second.function->module = frame.closure->module;
+                    }
+                }
+                for (auto& op : val.structDef->operators) {
+                    if (op.function) {
+                        op.function->module = frame.closure->module;
+                    }
+                }
+            }
+            push(val);
+            break;
+        }
         case OpCode::OP_CONSTANT: {
             uint16_t index = read16(frame.ip);
             push(frame.closure->function->chunk.constants[index]);
@@ -1058,10 +1138,13 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             bool isPublic = (flags & 1) != 0;
             bool isConst = (flags & 2) != 0;
             std::string name = frame.closure->function->chunk.constants[index].str;
-            Value val = pop();
+            Value val = cloneValue(pop());
             if (val.isFunction()) {
                 if (val.closure) val.closure->module = frame.closure->module;
                 if (val.function) val.function->module = frame.closure->module;
+            }
+            if (val.isStructDef() && val.structDef) {
+                val.structDef->module = frame.closure->module;
             }
             frame.closure->module->globals[name] = val;
             frame.closure->module->symbols[name] = SymbolInfo{isPublic, isConst, TypeSpec{TypeKind::ANY}};
@@ -1075,7 +1158,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             bool isConst = (flags & 2) != 0;
             TypeSpec expected = parseTypeSpecString(frame.closure->function->chunk.constants[typeSpecIdx].str);
             std::string name = frame.closure->function->chunk.constants[index].str;
-            Value val = pop();
+            Value val = cloneValue(pop());
             if (!checkAndCoerceValueType(expected, val)) {
                 std::cout << "[Runtime Error]: Type mismatch for global variable '" << name
                           << "': expected " << expected.toString() << " but got "
@@ -1085,6 +1168,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (val.isFunction()) {
                 if (val.closure) val.closure->module = frame.closure->module;
                 if (val.function) val.function->module = frame.closure->module;
+            }
+            if (val.isStructDef() && val.structDef) {
+                val.structDef->module = frame.closure->module;
             }
             frame.closure->module->globals[name] = val;
             frame.closure->module->symbols[name] = SymbolInfo{isPublic, isConst, expected};
@@ -1155,10 +1241,10 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         }
         case OpCode::OP_SET_LOCAL: {
             uint16_t slot = read16(frame.ip);
+            Value val = cloneValue(peek(0));
             if (slot < frame.closure->function->localTypes.size()) {
                 TypeSpec expected = frame.closure->function->localTypes[slot];
                 if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
-                    Value val = peek(0);
                     if (!checkAndCoerceValueType(expected, val)) {
                         std::cout << "[Runtime Error]: Type mismatch for local variable: expected "
                                   << expected.toString() << " but got "
@@ -1169,7 +1255,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     break;
                 }
             }
-            stack[frame.slotsOffset + slot] = peek(0);
+            stack[frame.slotsOffset + slot] = val;
             break;
         }
         case OpCode::OP_GET_UPVALUE: {
@@ -1180,7 +1266,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_SET_UPVALUE: {
             uint16_t slot = read16(frame.ip);
             UpvaluePtr upvalue = frame.closure->upvalues[slot];
-            Value val = peek(0);
+            Value val = cloneValue(peek(0));
             if (upvalue->typeSpec.kind != TypeKind::ANY && upvalue->typeSpec.kind != TypeKind::UNTYPED) {
                 if (!checkAndCoerceValueType(upvalue->typeSpec, val)) {
                     std::cout << "[Runtime Error]: Type mismatch for variable: expected "
@@ -1256,11 +1342,55 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             uint16_t argCount = read16(frame.ip);
             Value callee = peek(argCount);
             std::vector<std::string> emptyNames;
-            if (callee.isFunction()) {
-                if (!call(callee.closure, argCount, emptyNames)) {
+            if (callee.isStructDef()) {
+                StructDefPtr sDef = callee.structDef;
+                auto instance = std::make_shared<ObjStructInstance>();
+                instance->def = sDef;
+
+                int totalFields = static_cast<int>(sDef->fields.size());
+                int posCount = argCount;
+
+                if (posCount > totalFields) {
+                    std::cout << "[Runtime Error]: Too many positional arguments for constructor of '" << sDef->name << "'." << std::endl;
                     return false;
                 }
 
+                std::vector<Value> fieldValues(totalFields, Value());
+                size_t stackArgsStart = stack.size() - argCount;
+                for (int i = 0; i < posCount; ++i) {
+                    fieldValues[i] = cloneValue(stack[stackArgsStart + i]);
+                }
+
+                for (int i = 0; i < totalFields; ++i) {
+                    const auto& fInfo = sDef->fields[i];
+                    Value& fieldVal = fieldValues[i];
+                    if (i < posCount && !fieldVal.isNil()) {
+                        if (!checkAndCoerceValueType(fInfo.typeSpec, fieldVal)) {
+                            std::cout << "[Runtime Error]: Type mismatch for field '" << fInfo.name << "' in constructor of '" << sDef->name << "': expected " << fInfo.typeSpec.toString() << " but got " << fieldVal.getTypeSpec().toString() << "." << std::endl;
+                            return false;
+                        }
+                    }
+                    instance->fields[fInfo.name] = fieldVal;
+                }
+
+                stack.resize(stackArgsStart - 1);
+                push(Value(instance));
+                break;
+            } else if (callee.isBoundMethod()) {
+                BoundMethodPtr bm = callee.boundMethod;
+                ClosurePtr methodClosure = std::make_shared<ObjClosure>();
+                methodClosure->function = bm->method;
+                methodClosure->module = bm->method->module ? bm->method->module : frame.closure->module;
+
+                size_t calleePos = stack.size() - argCount - 1;
+                stack[calleePos] = Value(methodClosure);
+                stack.insert(stack.begin() + calleePos + 1, bm->receiver);
+                if (!call(methodClosure, argCount + 1, emptyNames)) return false;
+                break;
+            } else if (callee.isFunction()) {
+                if (!call(callee.closure, argCount, emptyNames)) {
+                    return false;
+                }
             } else if (callee.isNative()) {
                 try {
                     Value* args = &stack[stack.size() - argCount];
@@ -1286,7 +1416,70 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 argNames[i] = frame.closure->function->chunk.constants[nameIdx].str;
             }
             Value callee = peek(argCount);
-            if (callee.isFunction()) {
+            if (callee.isStructDef()) {
+                StructDefPtr sDef = callee.structDef;
+                auto instance = std::make_shared<ObjStructInstance>();
+                instance->def = sDef;
+
+                int totalFields = static_cast<int>(sDef->fields.size());
+                int posCount = argCount - namedCount;
+
+                if (posCount > totalFields) {
+                    std::cout << "[Runtime Error]: Too many positional arguments for constructor of '" << sDef->name << "'." << std::endl;
+                    return false;
+                }
+
+                std::vector<bool> fieldSet(totalFields, false);
+                std::vector<Value> fieldValues(totalFields, Value());
+
+                size_t stackArgsStart = stack.size() - argCount;
+                for (int i = 0; i < posCount; ++i) {
+                    fieldValues[i] = cloneValue(stack[stackArgsStart + i]);
+                    fieldSet[i] = true;
+                }
+
+                for (int k = 0; k < namedCount; ++k) {
+                    const std::string& fieldName = argNames[k];
+                    int fIdx = sDef->findField(fieldName);
+                    if (fIdx == -1) {
+                        std::cout << "[Runtime Error]: Unknown named argument '" << fieldName << "' in constructor of '" << sDef->name << "'." << std::endl;
+                        return false;
+                    }
+                    if (fieldSet[fIdx]) {
+                        std::cout << "[Runtime Error]: Duplicate argument for field '" << fieldName << "' in constructor of '" << sDef->name << "'." << std::endl;
+                        return false;
+                    }
+                    fieldValues[fIdx] = cloneValue(stack[stackArgsStart + posCount + k]);
+                    fieldSet[fIdx] = true;
+                }
+
+                for (int i = 0; i < totalFields; ++i) {
+                    const auto& fInfo = sDef->fields[i];
+                    Value& fieldVal = fieldValues[i];
+                    if (fieldSet[i] && !fieldVal.isNil()) {
+                        if (!checkAndCoerceValueType(fInfo.typeSpec, fieldVal)) {
+                            std::cout << "[Runtime Error]: Type mismatch for field '" << fInfo.name << "' in constructor of '" << sDef->name << "': expected " << fInfo.typeSpec.toString() << " but got " << fieldVal.getTypeSpec().toString() << "." << std::endl;
+                            return false;
+                        }
+                    }
+                    instance->fields[fInfo.name] = fieldVal;
+                }
+
+                stack.resize(stackArgsStart - 1);
+                push(Value(instance));
+                break;
+            } else if (callee.isBoundMethod()) {
+                BoundMethodPtr bm = callee.boundMethod;
+                ClosurePtr methodClosure = std::make_shared<ObjClosure>();
+                methodClosure->function = bm->method;
+                methodClosure->module = bm->method->module ? bm->method->module : frame.closure->module;
+
+                size_t calleePos = stack.size() - argCount - 1;
+                stack[calleePos] = Value(methodClosure);
+                stack.insert(stack.begin() + calleePos + 1, bm->receiver);
+                if (!call(methodClosure, argCount + 1, argNames)) return false;
+                break;
+            } else if (callee.isFunction()) {
                 if (!call(callee.closure, argCount, argNames)) return false;
 
             } else if (callee.isNative()) {
@@ -1437,6 +1630,63 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
 
                 push(mod->globals[memberName]);
                 break;
+            }
+
+            if (target.isStruct()) {
+                StructInstancePtr inst = target.structInstance;
+                if (!inst || !inst->def) {
+                    std::cout << "[Runtime Error]: Accessing member on invalid struct instance." << std::endl;
+                    return false;
+                }
+                int fIdx = inst->def->findField(memberName);
+                if (fIdx != -1) {
+                    const auto& fInfo = inst->def->fields[fIdx];
+                    if (!fInfo.isPublic) {
+                        bool allowed = (frame.closure->module && inst->def->module && frame.closure->module == inst->def->module);
+                        if (!allowed && stack.size() > frame.slotsOffset) {
+                            const Value& rec = stack[frame.slotsOffset];
+                            if (rec.isStruct() && rec.structInstance && rec.structInstance->def && rec.structInstance->def->name == inst->def->name) {
+                                allowed = true;
+                            }
+                        }
+                        if (!allowed) {
+                            std::cout << "[Module Error]: Cannot access private field '" << memberName << "' of struct '" << inst->def->name << "'." << std::endl;
+                            return false;
+                        }
+                    }
+                    auto it = inst->fields.find(memberName);
+                    push((it != inst->fields.end()) ? it->second : Value());
+                    break;
+                }
+
+                auto mIt = inst->def->methods.find(memberName);
+                if (mIt != inst->def->methods.end()) {
+                    const auto& mInfo = mIt->second;
+                    if (!mInfo.isPublic) {
+                        bool allowed = (frame.closure->module && inst->def->module && frame.closure->module == inst->def->module);
+                        if (!allowed && stack.size() > frame.slotsOffset) {
+                            const Value& rec = stack[frame.slotsOffset];
+                            if (rec.isStruct() && rec.structInstance && rec.structInstance->def && rec.structInstance->def->name == inst->def->name) {
+                                allowed = true;
+                            }
+                        }
+                        if (!allowed) {
+                            std::cout << "[Module Error]: Cannot access private method '" << memberName << "' of struct '" << inst->def->name << "'." << std::endl;
+                            return false;
+                        }
+                    }
+                    auto bm = std::make_shared<ObjBoundMethod>();
+                    bm->receiver = target;
+                    bm->method = mInfo.function;
+                    if (bm->method && !bm->method->module) {
+                        bm->method->module = inst->def->module;
+                    }
+                    push(Value(bm));
+                    break;
+                }
+
+                std::cout << "[Member Error]: Struct '" << inst->def->name << "' has no field or method named '" << memberName << "'." << std::endl;
+                return false;
             }
 
             if (target.isArray()) {
@@ -2130,6 +2380,46 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value val = pop();
             Value target = pop();
 
+            if (target.isStruct()) {
+                StructInstancePtr inst = target.structInstance;
+                if (!inst || !inst->def) {
+                    std::cout << "[Runtime Error]: Setting field on invalid struct instance." << std::endl;
+                    return false;
+                }
+                int fIdx = inst->def->findField(memberName);
+                if (fIdx == -1) {
+                    std::cout << "[Member Error]: Unknown field '" << memberName << "' in struct '" << inst->def->name << "'." << std::endl;
+                    return false;
+                }
+                const auto& fInfo = inst->def->fields[fIdx];
+                if (fInfo.isConst) {
+                    std::cout << "[Runtime Error]: Cannot assign to constant field '" << memberName << "'." << std::endl;
+                    return false;
+                }
+                if (!fInfo.isPublic) {
+                    bool allowed = (frame.closure->module && inst->def->module && frame.closure->module == inst->def->module);
+                    if (!allowed && stack.size() > frame.slotsOffset) {
+                        const Value& rec = stack[frame.slotsOffset];
+                        if (rec.isStruct() && rec.structInstance && rec.structInstance->def && rec.structInstance->def->name == inst->def->name) {
+                            allowed = true;
+                        }
+                    }
+                    if (!allowed) {
+                        std::cout << "[Module Error]: Cannot access private field '" << memberName << "' of struct '" << inst->def->name << "'." << std::endl;
+                        return false;
+                    }
+                }
+                if (!val.isNil()) {
+                    if (!checkAndCoerceValueType(fInfo.typeSpec, val)) {
+                        std::cout << "[Runtime Error]: Type mismatch for field '" << memberName << "': expected " << fInfo.typeSpec.toString() << " but got " << val.getTypeSpec().toString() << "." << std::endl;
+                        return false;
+                    }
+                }
+                inst->fields[memberName] = cloneValue(val);
+                push(val);
+                break;
+            }
+
             if (!target.isModule() || !target.module) {
                 std::cout << "[Member Error]: Cannot set member '" << memberName << "' on non-module value." << std::endl;
                 return false;
@@ -2521,12 +2811,21 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_EQUAL: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("==", a, b, false)) break;
             push(Value(a.isEqual(b)));
+            break;
+        }
+        case OpCode::OP_NOT_EQUAL: {
+            Value b = pop();
+            Value a = pop();
+            if (a.isStruct() && callOperatorOverload("!=", a, b, false)) break;
+            push(Value(!a.isEqual(b)));
             break;
         }
         case OpCode::OP_GREATER: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload(">", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 std::cout << "[Runtime Error]: '>' only supports numbers!" << std::endl;
                 return false;
@@ -2538,9 +2837,25 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             }
             break;
         }
+        case OpCode::OP_GREATER_EQUAL: {
+            Value b = pop();
+            Value a = pop();
+            if (a.isStruct() && callOperatorOverload(">=", a, b, false)) break;
+            if (!a.isNumber() || !b.isNumber()) {
+                std::cout << "[Runtime Error]: '>=' only supports numbers!" << std::endl;
+                return false;
+            }
+            if (a.isInt() && b.isInt()) {
+                push(Value(a.intVal >= b.intVal));
+            } else {
+                push(Value(a.asFloat() >= b.asFloat()));
+            }
+            break;
+        }
         case OpCode::OP_LESS: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("<", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 std::cout << "[Runtime Error]: '<' only supports numbers!" << std::endl;
                 return false;
@@ -2552,9 +2867,53 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             }
             break;
         }
+        case OpCode::OP_LESS_EQUAL: {
+            Value b = pop();
+            Value a = pop();
+            if (a.isStruct() && callOperatorOverload("<=", a, b, false)) break;
+            if (!a.isNumber() || !b.isNumber()) {
+                std::cout << "[Runtime Error]: '<=' only supports numbers!" << std::endl;
+                return false;
+            }
+            if (a.isInt() && b.isInt()) {
+                push(Value(a.intVal <= b.intVal));
+            } else {
+                push(Value(a.asFloat() <= b.asFloat()));
+            }
+            break;
+        }
+        case OpCode::OP_UNARY_MINUS: {
+            Value a = pop();
+            if (a.isStruct() && callOperatorOverload("-", a, Value(), true)) break;
+            if (a.isInt()) {
+                if (a.intVal == std::numeric_limits<int64_t>::min()) {
+                    std::cout << "[Runtime Error]: 64-bit integer negation overflow." << std::endl;
+                    return false;
+                }
+                push(Value(-a.intVal));
+            } else if (a.isFloat()) {
+                push(Value(-a.floatVal));
+            } else {
+                std::cout << "[Runtime Error]: '-' operand must be a number." << std::endl;
+                return false;
+            }
+            break;
+        }
+        case OpCode::OP_UNARY_PLUS: {
+            Value a = pop();
+            if (a.isStruct() && callOperatorOverload("+", a, Value(), true)) break;
+            if (a.isNumber()) {
+                push(a);
+            } else {
+                std::cout << "[Runtime Error]: '+' operand must be a number." << std::endl;
+                return false;
+            }
+            break;
+        }
         case OpCode::OP_ADD: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("+", a, b, false)) break;
             if (a.isString() || b.isString() || a.isChar() || b.isChar()) {
                 push(Value(a.toString() + b.toString()));
             } else if (a.isInt() && b.isInt()) {
@@ -2575,6 +2934,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_SUBTRACT: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("-", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 std::cout << "[Runtime Error]: '-' only supports numbers!" << std::endl;
                 return false;
@@ -2594,6 +2954,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_MULTIPLY: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("*", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 std::cout << "[Runtime Error]: '*' only supports numbers!" << std::endl;
                 return false;
@@ -2613,6 +2974,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_DIVIDE: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("/", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 runtimeError("'/' only supports numbers!");
                 return false;
@@ -2639,6 +3001,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_MODULO: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("%", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 std::cout << "[Runtime Error]: '%' only supports numbers!" << std::endl;
                 return false;
@@ -2661,6 +3024,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_POWER: {
             Value b = pop();
             Value a = pop();
+            if (a.isStruct() && callOperatorOverload("^", a, b, false)) break;
             if (!a.isNumber() || !b.isNumber()) {
                 std::cout << "[Runtime Error]: '^' only supports numbers!" << std::endl;
                 return false;

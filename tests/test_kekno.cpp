@@ -1120,7 +1120,7 @@ static void testV059RegressionSuite() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("integer overflow in abs()") != std::string::npos, "abs(INT64_MIN) integer overflow runtime error");
 
     out = runCodeFresh("echo -(-9223372036854775808)~", ok);
-    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("integer multiplication overflow") != std::string::npos, "unary negation of INT64_MIN overflow error");
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("overflow") != std::string::npos, "unary negation of INT64_MIN overflow error");
 
     out = runCodeFresh("let bad = 9223372036854775808~", ok);
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("out of 64-bit range") != std::string::npos, "positive 9223372036854775808 rejected");
@@ -1148,13 +1148,13 @@ static void testV059RegressionSuite() {
         f2 << "let x = 1 / 0~\n";
         f2.close();
 
-        int status1 = std::system("./kekno /tmp/test_cli_ok.kek >/dev/null 2>&1");
+        int status1 = std::system("([ -f ./kekno ] && ./kekno /tmp/test_cli_ok.kek || ./build/kekno /tmp/test_cli_ok.kek) >/dev/null 2>&1");
         TEST_ASSERT(WEXITSTATUS(status1) == 0, "CLI exit code 0 on success");
 
-        int status2 = std::system("./kekno /tmp/test_cli_err.kek >/dev/null 2>&1");
+        int status2 = std::system("([ -f ./kekno ] && ./kekno /tmp/test_cli_err.kek || ./build/kekno /tmp/test_cli_err.kek) >/dev/null 2>&1");
         TEST_ASSERT(WEXITSTATUS(status2) != 0, "CLI exit code non-zero on runtime error");
 
-        int status3 = std::system("./kekno /tmp/non_existent_file.kek >/dev/null 2>&1");
+        int status3 = std::system("([ -f ./kekno ] && ./kekno /tmp/non_existent_file.kek || ./build/kekno /tmp/non_existent_file.kek) >/dev/null 2>&1");
         TEST_ASSERT(WEXITSTATUS(status3) != 0, "CLI exit code non-zero on missing file");
 
         std::remove("/tmp/test_cli_ok.kek");
@@ -1162,8 +1162,212 @@ static void testV059RegressionSuite() {
     }
 }
 
+static void testV060StructsAndOperators() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Basic struct declarations & zero-field structs
+    out = runCodeFresh("build Zero {}~\n let z = Zero()~\n echo typeof(z)~\n", ok);
+    TEST_ASSERT(ok && out.find("=> Zero") != std::string::npos, "zero field struct construction and typeof");
+
+    // 2. Positional & named construction, missing fields default to nil
+    std::string personCode =
+        "build Person {\n"
+        "    const name : string~\n"
+        "    let age : int~\n"
+        "}~\n"
+        "let p1 = Person(\"BBZ\", 15)~\n"
+        "echo p1.name~\n"
+        "echo p1.age~\n"
+        "let p2 = Person(age=20, name=\"Alice\")~\n"
+        "echo p2.name~\n"
+        "echo p2.age~\n"
+        "let p3 = Person(\"Charlie\")~\n"
+        "echo p3.name~\n"
+        "echo p3.age~\n";
+    out = runCodeFresh(personCode, ok);
+    TEST_ASSERT(ok && out.find("=> BBZ") != std::string::npos && out.find("=> 15") != std::string::npos &&
+                out.find("=> Alice") != std::string::npos && out.find("=> 20") != std::string::npos &&
+                out.find("=> Charlie") != std::string::npos && out.find("=> nil") != std::string::npos,
+                "positional, named, and default constructor arguments");
+
+    // 3. Constructor error checking
+    out = runCodeFresh("build Point { let x : int~ }~ Point(1, 2)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "constructor too many positional args error");
+
+    out = runCodeFresh("build Point { let x : int~ }~ Point(y=10)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Unknown named argument") != std::string::npos, "constructor unknown named arg error");
+
+    out = runCodeFresh("build Point { let x : int~ }~ Point(x=1, x=2)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "constructor duplicate argument error");
+
+    out = runCodeFresh("build Point { let x : int~ }~ Point(\"wrong\")~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Type mismatch") != std::string::npos, "constructor invalid field type error");
+
+    // 4. Duplicate field name compile-time error
+    out = runCodeFresh("build Bad { let x : int~\n let x : string~ }~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Duplicate field") != std::string::npos, "duplicate field compile error");
+
+    // 5. Const fields and const struct variable checks
+    out = runCodeFresh("build Person { const name : string~\n let age : int~ }~ let p = Person(\"A\", 10)~ p.name = \"B\"~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("constant field") != std::string::npos, "reassigning const field error");
+
+    out = runCodeFresh("build Person { let name : string~\n let age : int~ }~ const p = Person(\"A\", 10)~ p.age = 20~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("const variable") != std::string::npos, "mutating field of const struct variable compile error");
+
+    // 6. Independent value copy semantics (assignment & parameters)
+    std::string copyCode =
+        "build Person {\n"
+        "    let name : string~\n"
+        "    let age : int~\n"
+        "}~\n"
+        "let p1 = Person(\"A\", 10)~\n"
+        "let p2 = p1~\n"
+        "p2.age = 99~\n"
+        "echo p1.age~\n"
+        "echo p2.age~\n"
+        "task updateAge(Person p) {\n"
+        "    p.age = 500~\n"
+        "}\n"
+        "updateAge(p1)~\n"
+        "echo p1.age~\n";
+    out = runCodeFresh(copyCode, ok);
+    TEST_ASSERT(ok && out.find("=> 10\n=> 99\n=> 10") != std::string::npos, "struct value copy semantics on assignment and task param");
+
+    // 7. Structs in arrays and maps, with nested property updates
+    std::string collectionCode =
+        "build Person {\n"
+        "    let name : string~\n"
+        "    let age : int~\n"
+        "}~\n"
+        "let people : array<Person> = [\n"
+        "    Person(\"A\", 15),\n"
+        "    Person(\"B\", 16)\n"
+        "]~\n"
+        "people[0].age = 17~\n"
+        "echo people[0].age~\n"
+        "let mapByName : map<string, Person> = {}~\n"
+        "mapByName.put(\"BBZ\", Person(\"BBZ\", 25))~\n"
+        "echo mapByName.get(\"BBZ\").age~\n";
+    out = runCodeFresh(collectionCode, ok);
+    TEST_ASSERT(ok && out.find("=> 17") != std::string::npos && out.find("=> 25") != std::string::npos, "structs inside typed arrays and maps with member updates");
+
+    // 8. Methods, self keyword, and method calls
+    std::string methodCode =
+        "build Counter {\n"
+        "    let count : int~\n"
+        "    task increment() {\n"
+        "        self.count = self.count + 1~\n"
+        "    }\n"
+        "    task reset() {\n"
+        "        count = 0~\n"
+        "    }\n"
+        "}~\n"
+        "let c = Counter(10)~\n"
+        "c.increment()~\n"
+        "echo c.count~\n"
+        "c.reset()~\n"
+        "echo c.count~\n";
+    out = runCodeFresh(methodCode, ok);
+    TEST_ASSERT(ok && out.find("=> 11\n=> 0") != std::string::npos, "struct methods, self, and direct field access");
+
+    // 9. Assigning to self compile error
+    out = runCodeFresh("build C { let x : int~ task bad() { self = C(5)~ } }~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos, "reassigning self error");
+
+    // 10. Same-type private access in methods
+    std::string sameTypePrivateCode =
+        "build Person {\n"
+        "    priv let secret : int~\n"
+        "    pub task setSecret(s : int) { secret = s~ }\n"
+        "    pub task compareSecret(Person other) : bool {\n"
+        "        give self.secret > other.secret~\n"
+        "    }\n"
+        "}~\n"
+        "let p1 = Person(0)~\n"
+        "let p2 = Person(0)~\n"
+        "p1.setSecret(100)~\n"
+        "p2.setSecret(50)~\n"
+        "echo p1.compareSecret(p2)~\n";
+    out = runCodeFresh(sameTypePrivateCode, ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos, "same-type private field access in method");
+
+    // 11. Cross-module visibility
+    std::string modFile = "/tmp/mod_v060.kek";
+    std::ofstream fMod(modFile);
+    fMod << "pub build Item {\n"
+         << "    pub let id : int~\n"
+         << "    priv let secret : string~\n"
+         << "    pub task getSecret() { give secret~ }\n"
+         << "}~\n";
+    fMod.close();
+
+    std::string useModCode =
+        "grab /tmp/mod_v060 as mod~\n"
+        "let item = mod.Item(42, \"hidden\")~\n"
+        "echo item.id~\n"
+        "echo item.getSecret()~\n";
+    out = runCodeFresh(useModCode, ok);
+    TEST_ASSERT(ok && out.find("=> 42\n=> hidden") != std::string::npos, "cross-module pub build construction and member access");
+
+    std::string privateFieldCode =
+        "grab /tmp/mod_v060 as mod~\n"
+        "let item = mod.Item(42, \"hidden\")~\n"
+        "echo item.secret~\n";
+    out = runCodeFresh(privateFieldCode, ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private field") != std::string::npos, "cross-module private field error");
+    std::remove(modFile.c_str());
+
+    // 12. Operator overloading (binary +, -, ==, !=, unary -) and compound assignment
+    std::string vecCode =
+        "build Vec2 {\n"
+        "    let x : float~\n"
+        "    let y : float~\n"
+        "    operator +(other : Vec2) {\n"
+        "        give Vec2(self.x + other.x, self.y + other.y)~\n"
+        "    }\n"
+        "    operator -(other : Vec2) {\n"
+        "        give Vec2(self.x - other.x, self.y - other.y)~\n"
+        "    }\n"
+        "    operator -() {\n"
+        "        give Vec2(-self.x, -self.y)~\n"
+        "    }\n"
+        "    operator ==(other : Vec2) {\n"
+        "        give self.x == other.x and self.y == other.y~\n"
+        "    }\n"
+        "}~\n"
+        "let v1 = Vec2(2.0, 3.0)~\n"
+        "let v2 = Vec2(4.0, 5.0)~\n"
+        "let v3 = v1 + v2~\n"
+        "echo v3.x~\n"
+        "echo v3.y~\n"
+        "let v4 = -v1~\n"
+        "echo v4.x~\n"
+        "echo v4.y~\n"
+        "echo v1 == Vec2(2.0, 3.0)~\n"
+        "echo v1 != v2~\n";
+    out = runCodeFresh(vecCode, ok);
+    TEST_ASSERT(ok && out.find("=> 6") != std::string::npos && out.find("=> 8") != std::string::npos &&
+                out.find("=> -2") != std::string::npos && out.find("=> -3") != std::string::npos &&
+                out.find("=> true\n=> true") != std::string::npos, "operator overloading +, binary -, unary -, ==, and !=");
+
+    // 13. Recursive struct types and cycle safety (equality, string conversion)
+    std::string nodeCode =
+        "build Node {\n"
+        "    let val : int~\n"
+        "    let next : Node~\n"
+        "}~\n"
+        "let n1 = Node(1, nil)~\n"
+        "let n2 = Node(2, n1)~\n"
+        "echo n2.val~\n"
+        "echo n2.next.val~\n"
+        "echo n2~\n";
+    out = runCodeFresh(nodeCode, ok);
+    TEST_ASSERT(ok && out.find("=> 2\n=> 1") != std::string::npos && out.find("Node{val: 2, next: Node{val: 1, next: nil}}") != std::string::npos, "recursive struct and nested toString");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.5.9 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.6.0 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -1189,6 +1393,7 @@ int main() {
     testV056RegressionSuite();
     testV058NewFeaturesAndIntegrations();
     testV059RegressionSuite();
+    testV060StructsAndOperators();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

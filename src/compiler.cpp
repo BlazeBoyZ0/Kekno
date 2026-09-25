@@ -315,6 +315,37 @@ uint16_t Compiler::argumentList() {
     return totalArgCount;
 }
 
+void Compiler::parseParameter(TypeSpec& outType, std::string& outName) {
+    if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::COLON) {
+        outName = current.text;
+        advance(); advance();
+        outType = parseTypeDeclaration();
+    } else if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER) {
+        outType = parseTypeDeclaration();
+        outName = current.text;
+        advance();
+    } else if ((current.type >= TokenType::TYPE_INT && current.type <= TokenType::TYPE_FUNC) && lexer.peekToken().type == TokenType::IDENTIFIER) {
+        outType = parseTypeDeclaration();
+        outName = current.text;
+        advance();
+    } else if (current.type == TokenType::IDENTIFIER &&
+              (lexer.peekToken().type == TokenType::COMMA || lexer.peekToken().type == TokenType::RPAREN)) {
+        outName = current.text;
+        outType = TypeSpec{TypeKind::ANY};
+        advance();
+    } else {
+        outType = parseTypeDeclaration();
+        if (current.type == TokenType::IDENTIFIER) {
+            outName = current.text;
+            advance();
+        } else if (!outType.structName.empty()) {
+            outName = outType.structName;
+        } else {
+            outName = "param";
+        }
+    }
+}
+
 TypeSpec Compiler::parseTypeDeclaration() {
     TypeSpec spec;
     if (current.type == TokenType::TYPE_INT) { spec.kind = TypeKind::INT; advance(); }
@@ -347,6 +378,10 @@ TypeSpec Compiler::parseTypeDeclaration() {
             spec.valType = std::make_shared<TypeSpec>(vSpec);
             consume(TokenType::GREATER, "Expected '>' after map value type");
         }
+    } else if (current.type == TokenType::IDENTIFIER) {
+        spec.kind = TypeKind::STRUCT;
+        spec.structName = current.text;
+        advance();
     }
     return spec;
 }
@@ -379,7 +414,7 @@ void Compiler::primary() {
     } else if (current.type == TokenType::NIL) {
         chunk().writeOp(OpCode::OP_NIL);
         advance();
-    } else if (current.type == TokenType::IDENTIFIER) {
+    } else if (current.type == TokenType::IDENTIFIER || current.type == TokenType::SELF) {
         std::string name = current.text;
         advance();
         int localSlot = resolveLocal(currentContext, name);
@@ -391,6 +426,20 @@ void Compiler::primary() {
             if (upvalueSlot != -1) {
                 chunk().writeOp(OpCode::OP_GET_UPVALUE);
                 chunk().write16(static_cast<uint16_t>(upvalueSlot));
+            } else if (currentStructDef && currentStructDef->findField(name) != -1) {
+                // Direct field access inside method
+                int selfSlot = resolveLocal(currentContext, "self");
+                if (selfSlot != -1) {
+                    chunk().writeOp(OpCode::OP_GET_LOCAL);
+                    chunk().write16(static_cast<uint16_t>(selfSlot));
+                    uint16_t memberIdx = addConstant(Value(name));
+                    chunk().writeOp(OpCode::OP_GET_MEMBER);
+                    chunk().write16(memberIdx);
+                } else {
+                    uint16_t nameIdx = addConstant(Value(name));
+                    chunk().writeOp(OpCode::OP_GET_GLOBAL);
+                    chunk().write16(nameIdx);
+                }
             } else {
                 uint16_t nameIdx = addConstant(Value(name));
                 chunk().writeOp(OpCode::OP_GET_GLOBAL);
@@ -494,13 +543,10 @@ void Compiler::primary() {
                     }
                     fn->paramTypes.push_back(pSpec);
 
-                    if (current.type != TokenType::IDENTIFIER) {
-                        errorAt(current, "Expected parameter name", "Syntax Error");
-                    } else {
-                        fn->paramNames.push_back(current.text);
-                        addLocal(current.text, false, pSpec);
-                        advance();
-                    }
+                    std::string pName;
+                    parseParameter(pSpec, pName);
+                    fn->paramNames.push_back(pName);
+                    addLocal(pName, false, pSpec);
                 } while (match(TokenType::COMMA));
             }
             consume(TokenType::RPAREN, "Expected ')' after parameters");
@@ -737,8 +783,11 @@ void Compiler::unary() {
             return;
         }
         unary();
-        emitConstant(Value(static_cast<int64_t>(-1)));
-        chunk().writeOp(OpCode::OP_MULTIPLY);
+        chunk().writeOp(OpCode::OP_UNARY_MINUS);
+    } else if (current.type == TokenType::PLUS) {
+        advance();
+        unary();
+        chunk().writeOp(OpCode::OP_UNARY_PLUS);
     } else {
         postfix();
     }
@@ -790,13 +839,11 @@ void Compiler::relational() {
         if (op == TokenType::GREATER) {
             chunk().writeOp(OpCode::OP_GREATER);
         } else if (op == TokenType::GREATER_EQUAL) {
-            chunk().writeOp(OpCode::OP_LESS);
-            chunk().writeOp(OpCode::OP_NOT);
+            chunk().writeOp(OpCode::OP_GREATER_EQUAL);
         } else if (op == TokenType::LESS) {
             chunk().writeOp(OpCode::OP_LESS);
         } else if (op == TokenType::LESS_EQUAL) {
-            chunk().writeOp(OpCode::OP_GREATER);
-            chunk().writeOp(OpCode::OP_NOT);
+            chunk().writeOp(OpCode::OP_LESS_EQUAL);
         }
     }
 }
@@ -811,8 +858,7 @@ void Compiler::equality() {
         if (op == TokenType::EQUAL_EQUAL) {
             chunk().writeOp(OpCode::OP_EQUAL);
         } else {
-            chunk().writeOp(OpCode::OP_EQUAL);
-            chunk().writeOp(OpCode::OP_NOT);
+            chunk().writeOp(OpCode::OP_NOT_EQUAL);
         }
     }
 }
@@ -862,19 +908,35 @@ void Compiler::varDeclaration(bool isPublic) {
     }
 
     TypeSpec typeSpec;
-    if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
-        current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
-        current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
-        typeSpec = parseTypeDeclaration();
-    }
+    std::string varName;
 
-    if (current.type != TokenType::IDENTIFIER) {
+    if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::COLON) {
+        varName = current.text;
+        advance(); advance(); // consume identifier and ':'
+        typeSpec = parseTypeDeclaration();
+    } else if (current.type >= TokenType::TYPE_INT && current.type <= TokenType::TYPE_FUNC) {
+        typeSpec = parseTypeDeclaration();
+        if (current.type != TokenType::IDENTIFIER) {
+            errorAt(current, "Expected variable name", "Syntax Error");
+            return;
+        }
+        varName = current.text;
+        advance();
+    } else if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER) {
+        typeSpec = parseTypeDeclaration();
+        if (current.type != TokenType::IDENTIFIER) {
+            errorAt(current, "Expected variable name", "Syntax Error");
+            return;
+        }
+        varName = current.text;
+        advance();
+    } else if (current.type == TokenType::IDENTIFIER) {
+        varName = current.text;
+        advance();
+    } else {
         errorAt(current, "Expected variable name", "Syntax Error");
         return;
     }
-    std::string varName = current.text;
-    advance();
 
     consume(TokenType::EQUAL, "Expected '=' after variable name");
     expression();
@@ -974,13 +1036,10 @@ void Compiler::taskDeclaration(bool isPublic) {
                 }
                 fn->paramTypes.push_back(pSpec);
 
-                if (current.type != TokenType::IDENTIFIER) {
-                    errorAt(current, "Expected parameter name", "Syntax Error");
-                } else {
-                    fn->paramNames.push_back(current.text);
-                    addLocal(current.text, false, pSpec);
-                    advance();
-                }
+                std::string pName;
+                parseParameter(pSpec, pName);
+                fn->paramNames.push_back(pName);
+                addLocal(pName, false, pSpec);
             } while (match(TokenType::COMMA));
         }
         consume(TokenType::RPAREN, "Expected ')' after parameters");
@@ -1176,21 +1235,18 @@ void Compiler::grabStatement() {
         return;
     }
 
-    if (current.type != TokenType::IDENTIFIER) {
+    std::string pathStr = "";
+    if (current.type == TokenType::STRING_LITERAL) {
+        pathStr = current.strValue;
+        advance();
+    } else if (current.type == TokenType::IDENTIFIER || current.type == TokenType::SLASH) {
+        while (current.type == TokenType::IDENTIFIER || current.type == TokenType::SLASH || current.type == TokenType::DOT) {
+            pathStr += current.text;
+            advance();
+        }
+    } else {
         errorAt(current, "Expected module path after 'grab'.", "Syntax Error");
         return;
-    }
-
-    std::string pathStr = current.text;
-    advance();
-
-    while (match(TokenType::DOT)) {
-        if (current.type != TokenType::IDENTIFIER) {
-            errorAt(current, "Expected identifier after '.' in module path.", "Syntax Error");
-            return;
-        }
-        pathStr += "." + current.text;
-        advance();
     }
 
     std::string alias = "";
@@ -1212,6 +1268,299 @@ void Compiler::grabStatement() {
     chunk().write16(aliasIdx);
 }
 
+void Compiler::buildDeclaration(bool isPublic) {
+    advance(); // consume 'build'
+    if (current.type != TokenType::IDENTIFIER) {
+        errorAt(current, "Expected struct name after 'build'.", "Syntax Error");
+        return;
+    }
+    std::string structName = current.text;
+    advance();
+
+    consume(TokenType::LBRACE, "Expected '{' before struct body.");
+
+    auto structDef = std::make_shared<ObjStructDef>();
+    structDef->name = structName;
+    structDef->isPublic = isPublic;
+
+    ObjStructDef* oldStructDef = currentStructDef;
+    currentStructDef = structDef.get();
+
+    while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+        bool memberPub = false;
+        if (match(TokenType::PUB)) {
+            memberPub = true;
+        } else if (match(TokenType::PRIV)) {
+            memberPub = false;
+        }
+
+        if (current.type == TokenType::LET || current.type == TokenType::CONST) {
+            bool isConst = match(TokenType::CONST);
+            if (!isConst) {
+                consume(TokenType::LET, "Expected 'let' or 'const'");
+            }
+            if (current.type != TokenType::IDENTIFIER) {
+                errorAt(current, "Expected field name.", "Syntax Error");
+                break;
+            }
+            std::string fieldName = current.text;
+            advance();
+
+            if (structDef->findField(fieldName) != -1) {
+                error("Duplicate field name '" + fieldName + "' in struct '" + structName + "'.", "Compiler Error");
+            }
+            if (structDef->methods.find(fieldName) != structDef->methods.end()) {
+                error("Field name '" + fieldName + "' collides with an existing method in struct '" + structName + "'.", "Compiler Error");
+            }
+
+            consume(TokenType::COLON, "Expected ':' after field name.");
+            TypeSpec fType = parseTypeDeclaration();
+
+            ObjStructDef::FieldInfo field;
+            field.name = fieldName;
+            field.typeSpec = fType;
+            field.isConst = isConst;
+            field.isPublic = memberPub;
+            structDef->fields.push_back(field);
+            match(TokenType::TILDE);
+        } else if (current.type == TokenType::TASK) {
+            advance(); // consume 'task'
+            if (current.type != TokenType::IDENTIFIER) {
+                errorAt(current, "Expected method name after 'task'.", "Syntax Error");
+                break;
+            }
+            std::string methodName = current.text;
+            advance();
+
+            if (structDef->findField(methodName) != -1) {
+                error("Method name '" + methodName + "' collides with an existing field in struct '" + structName + "'.", "Compiler Error");
+            }
+
+            FunctionPtr methodFn = std::make_shared<ObjFunction>();
+            methodFn->name = methodName;
+            methodFn->module = currentContext->function ? currentContext->function->module : nullptr;
+
+            CompilerContext fnContext(methodFn->chunk);
+            fnContext.enclosing = currentContext;
+            fnContext.function = methodFn;
+            fnContext.type = FunctionType::TYPE_METHOD;
+            fnContext.scopeDepth = 1;
+
+            TypeSpec selfType;
+            selfType.kind = TypeKind::STRUCT;
+            selfType.structName = structName;
+
+            methodFn->arity = 1;
+            methodFn->paramNames.push_back("self");
+            methodFn->paramTypes.push_back(selfType);
+
+            Local slot0;
+            slot0.name = "";
+            slot0.depth = 0;
+            fnContext.locals.push_back(slot0);
+
+            Local selfLocal;
+            selfLocal.name = "self";
+            selfLocal.depth = 0;
+            selfLocal.isConst = false;
+            selfLocal.typeSpec = selfType;
+            fnContext.locals.push_back(selfLocal);
+
+            CompilerContext* parentContext = currentContext;
+            Loop* enclosingLoop = currentLoop;
+
+            {
+                currentContext = &fnContext;
+                currentLoop = nullptr;
+
+                struct TaskScopeGuard {
+                    CompilerContext** ctxPtr;
+                    CompilerContext* parentCtx;
+                    Loop** loopPtr;
+                    Loop* parentLoop;
+                    TaskScopeGuard(CompilerContext** cP, CompilerContext* pC, Loop** lP, Loop* pL)
+                        : ctxPtr(cP), parentCtx(pC), loopPtr(lP), parentLoop(pL) {}
+                    ~TaskScopeGuard() {
+                        *ctxPtr = parentCtx;
+                        *loopPtr = parentLoop;
+                    }
+                } taskGuard(&currentContext, parentContext, &currentLoop, enclosingLoop);
+
+                consume(TokenType::LPAREN, "Expected '(' after method name.");
+                if (current.type != TokenType::RPAREN) {
+                    do {
+                        methodFn->arity++;
+                        TypeSpec pSpec;
+                        std::string pName;
+                        parseParameter(pSpec, pName);
+                        methodFn->paramTypes.push_back(pSpec);
+                        methodFn->paramNames.push_back(pName);
+                        addLocal(pName, false, pSpec);
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RPAREN, "Expected ')' after parameters.");
+                if (match(TokenType::COLON)) {
+                    parseTypeDeclaration();
+                }
+                consume(TokenType::LBRACE, "Expected '{' before method body.");
+
+                while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                    statement();
+                }
+                consume(TokenType::RBRACE, "Expected '}' after method body.");
+
+                chunk().writeOp(OpCode::OP_NIL);
+                chunk().writeOp(OpCode::OP_RETURN);
+                methodFn->localTypes = methodFn->chunk.localTypes;
+            }
+
+            ObjStructDef::MethodInfo methodInfo;
+            methodInfo.name = methodName;
+            methodInfo.function = methodFn;
+            methodInfo.isPublic = memberPub;
+            structDef->methods[methodName] = methodInfo;
+        } else if (current.type == TokenType::OPERATOR) {
+            advance(); // consume 'operator'
+            std::string opSymbol = "";
+            if (current.type == TokenType::PLUS) opSymbol = "+";
+            else if (current.type == TokenType::MINUS) opSymbol = "-";
+            else if (current.type == TokenType::STAR) opSymbol = "*";
+            else if (current.type == TokenType::SLASH) opSymbol = "/";
+            else if (current.type == TokenType::PERCENT) opSymbol = "%";
+            else if (current.type == TokenType::CARET) opSymbol = "^";
+            else if (current.type == TokenType::EQUAL_EQUAL) opSymbol = "==";
+            else if (current.type == TokenType::BANG_EQUAL) opSymbol = "!=";
+            else if (current.type == TokenType::LESS) opSymbol = "<";
+            else if (current.type == TokenType::LESS_EQUAL) opSymbol = "<=";
+            else if (current.type == TokenType::GREATER) opSymbol = ">";
+            else if (current.type == TokenType::GREATER_EQUAL) opSymbol = ">=";
+            else {
+                errorAt(current, "Unsupported operator overload symbol '" + current.text + "'.", "Syntax Error");
+                break;
+            }
+            advance();
+
+            FunctionPtr opFn = std::make_shared<ObjFunction>();
+            opFn->name = "operator " + opSymbol;
+            opFn->module = currentContext->function ? currentContext->function->module : nullptr;
+
+            CompilerContext fnContext(opFn->chunk);
+            fnContext.enclosing = currentContext;
+            fnContext.function = opFn;
+            fnContext.type = FunctionType::TYPE_METHOD;
+            fnContext.scopeDepth = 1;
+
+            TypeSpec selfType;
+            selfType.kind = TypeKind::STRUCT;
+            selfType.structName = structName;
+
+            opFn->arity = 1;
+            opFn->paramNames.push_back("self");
+            opFn->paramTypes.push_back(selfType);
+
+            Local slot0;
+            slot0.name = "";
+            slot0.depth = 0;
+            fnContext.locals.push_back(slot0);
+
+            Local selfLocal;
+            selfLocal.name = "self";
+            selfLocal.depth = 0;
+            selfLocal.isConst = false;
+            selfLocal.typeSpec = selfType;
+            fnContext.locals.push_back(selfLocal);
+
+            CompilerContext* parentContext = currentContext;
+            Loop* enclosingLoop = currentLoop;
+
+            TypeSpec rhsType{TypeKind::ANY};
+            bool isUnary = false;
+
+            {
+                currentContext = &fnContext;
+                currentLoop = nullptr;
+
+                struct TaskScopeGuard {
+                    CompilerContext** ctxPtr;
+                    CompilerContext* parentCtx;
+                    Loop** loopPtr;
+                    Loop* parentLoop;
+                    TaskScopeGuard(CompilerContext** cP, CompilerContext* pC, Loop** lP, Loop* pL)
+                        : ctxPtr(cP), parentCtx(pC), loopPtr(lP), parentLoop(pL) {}
+                    ~TaskScopeGuard() {
+                        *ctxPtr = parentCtx;
+                        *loopPtr = parentLoop;
+                    }
+                } taskGuard(&currentContext, parentContext, &currentLoop, enclosingLoop);
+
+                consume(TokenType::LPAREN, "Expected '(' after operator.");
+                if (current.type != TokenType::RPAREN) {
+                    opFn->arity = 2;
+                    std::string pName;
+                    parseParameter(rhsType, pName);
+                    opFn->paramTypes.push_back(rhsType);
+                    opFn->paramNames.push_back(pName);
+                    addLocal(pName, false, rhsType);
+                } else {
+                    opFn->arity = 1;
+                    isUnary = true;
+                }
+                consume(TokenType::RPAREN, "Expected ')' after parameter.");
+                consume(TokenType::LBRACE, "Expected '{' before operator body.");
+
+                while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                    statement();
+                }
+                consume(TokenType::RBRACE, "Expected '}' after operator body.");
+
+                chunk().writeOp(OpCode::OP_NIL);
+                chunk().writeOp(OpCode::OP_RETURN);
+                opFn->localTypes = opFn->chunk.localTypes;
+            }
+
+            for (const auto& existingOp : structDef->operators) {
+                if (existingOp.opName == opSymbol && existingOp.rightType == rhsType) {
+                    error("Duplicate operator signature for '" + opSymbol + "' in struct '" + structName + "'.", "Compiler Error");
+                }
+            }
+
+            ObjStructDef::OperatorInfo opOverload;
+            opOverload.opName = opSymbol;
+            opOverload.rightType = rhsType;
+            opOverload.function = opFn;
+            opOverload.isUnary = isUnary;
+            opOverload.isPublic = true;
+            structDef->operators.push_back(opOverload);
+        } else {
+            errorAt(current, "Expected field, task, or operator inside build definition.", "Syntax Error");
+            break;
+        }
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after struct body.");
+    consume(TokenType::TILDE, "Every statement must end with '~'");
+
+    currentStructDef = oldStructDef;
+
+    uint16_t defConstantIdx = addConstant(Value(structDef));
+    chunk().writeOp(OpCode::OP_STRUCT_DEF);
+    chunk().write16(defConstantIdx);
+
+    TypeSpec sType;
+    sType.kind = TypeKind::STRUCT;
+    sType.structName = structName;
+
+    if (currentContext->scopeDepth == 0) {
+        uint16_t nameIdx = addConstant(Value(structName));
+        uint8_t flags = isPublic ? 1 : 0;
+        chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
+        chunk().write16(nameIdx);
+        chunk().writeByte(flags);
+    } else {
+        addLocal(structName, false, sType);
+    }
+}
+
 void Compiler::statement() {
     if (hasError) return;
     if (current.type == TokenType::PUB || current.type == TokenType::PRIV) {
@@ -1226,9 +1575,13 @@ void Compiler::statement() {
             varDeclaration(isPublic);
         } else if (current.type == TokenType::TASK) {
             taskDeclaration(isPublic);
+        } else if (current.type == TokenType::BUILD) {
+            buildDeclaration(isPublic);
         } else {
             errorAt(current, "Expected variable or task declaration after '" + modName + "' modifier.", "Syntax Error");
         }
+    } else if (current.type == TokenType::BUILD) {
+        buildDeclaration(false);
     } else if (current.type == TokenType::LET || current.type == TokenType::CONST) {
         varDeclaration(false);
     } else if (current.type == TokenType::TASK) {
@@ -1472,6 +1825,26 @@ void Compiler::statement() {
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_MEMBER) {
                 uint16_t memberIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
                 chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+
+                // Check if base expression was a const variable
+                if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
+                    uint16_t baseSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                    if (baseSlot < currentContext->locals.size() && currentContext->locals[baseSlot].isConst) {
+                        error("Cannot mutate const variable '" + currentContext->locals[baseSlot].name + "'.", "Compiler Error");
+                    }
+                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
+                    uint16_t baseIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                    std::string varName = chunk().constants[baseIdx].str;
+                    if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
+                        error("Cannot mutate const variable '" + varName + "'.", "Compiler Error");
+                    }
+                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
+                    uint16_t baseSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
+                    if (baseSlot < currentContext->upvalues.size() && currentContext->upvalues[baseSlot].isConst) {
+                        error("Cannot mutate const variable '" + currentContext->upvalues[baseSlot].name + "'.", "Compiler Error");
+                    }
+                }
+
                 if (assignOp != TokenType::EQUAL) {
                     chunk().writeOp(OpCode::OP_DUP);
                     chunk().writeOp(OpCode::OP_GET_MEMBER);
@@ -1493,6 +1866,9 @@ void Compiler::statement() {
                 uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
                 chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
 
+                if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].name == "self") {
+                    error("Cannot assign to 'self'.", "Compiler Error");
+                }
                 if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].isConst) {
                     error("Cannot reassign constant variable '" + currentContext->locals[localSlot].name + "'.", "Compiler Error");
                 }

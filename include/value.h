@@ -12,10 +12,10 @@
 #include <algorithm>
 #include "chunk.h"
 
-enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE };
+enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE, STRUCT, BOUND_METHOD, STRUCT_DEF };
 
 enum class TypeKind {
-    ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC
+    ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC, STRUCT
 };
 
 struct TypeSpec {
@@ -23,6 +23,7 @@ struct TypeSpec {
     TypeKind elementKind = TypeKind::ANY;
     TypeKind keyKind = TypeKind::ANY;
     TypeKind valueKind = TypeKind::ANY;
+    std::string structName = "";
 
     std::shared_ptr<TypeSpec> elemType = nullptr;
     std::shared_ptr<TypeSpec> keyType = nullptr;
@@ -30,7 +31,8 @@ struct TypeSpec {
 
     bool operator==(const TypeSpec& other) const {
         if (kind != other.kind || elementKind != other.elementKind ||
-            keyKind != other.keyKind || valueKind != other.valueKind) return false;
+            keyKind != other.keyKind || valueKind != other.valueKind ||
+            structName != other.structName) return false;
         if ((elemType == nullptr) != (other.elemType == nullptr)) return false;
         if (elemType && !(*elemType == *other.elemType)) return false;
         if ((keyType == nullptr) != (other.keyType == nullptr)) return false;
@@ -53,6 +55,13 @@ struct ObjFunction;
 struct ObjClosure;
 struct ObjModule;
 struct ObjSlice;
+struct ObjStructDef;
+struct ObjStructInstance;
+struct ObjBoundMethod;
+
+using StructDefPtr = std::shared_ptr<ObjStructDef>;
+using StructInstancePtr = std::shared_ptr<ObjStructInstance>;
+using BoundMethodPtr = std::shared_ptr<ObjBoundMethod>;
 
 using UpvaluePtr = std::shared_ptr<ObjUpvalue>;
 using FunctionPtr = std::shared_ptr<ObjFunction>;
@@ -102,6 +111,49 @@ struct ObjArray {
 using ArrayPtr = std::shared_ptr<ObjArray>;
 using MapPtr = std::shared_ptr<ObjMap>;
 
+struct ObjStructDef {
+    std::string name;
+    bool isPublic = false;
+
+    struct FieldInfo {
+        std::string name;
+        TypeSpec typeSpec;
+        bool isConst = false;
+        bool isPublic = false;
+    };
+    std::vector<FieldInfo> fields;
+
+    int findField(const std::string& fieldName) const {
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (fields[i].name == fieldName) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    struct MethodInfo {
+        std::string name;
+        FunctionPtr function = nullptr;
+        bool isPublic = false;
+    };
+    std::unordered_map<std::string, MethodInfo> methods;
+
+    struct OperatorInfo {
+        std::string opName;
+        FunctionPtr function = nullptr;
+        TypeSpec rightType;
+        bool isUnary = false;
+        bool isPublic = true;
+    };
+    std::vector<OperatorInfo> operators;
+
+    ModulePtr module = nullptr;
+};
+
+struct ObjStructInstance {
+    StructDefPtr def = nullptr;
+    std::unordered_map<std::string, Value> fields;
+};
+
 struct Value {
     ValueType type;
     union {
@@ -118,20 +170,26 @@ struct Value {
     NativeFn nativeFn;
     ModulePtr module;
     SlicePtr slice;
+    StructDefPtr structDef;
+    StructInstancePtr structInstance;
+    BoundMethodPtr boundMethod;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
     Value(FunctionPtr fn);
     Value(ClosurePtr cl);
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr) {}
-    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr) {}
-    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr) {}
-    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl) {}
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(StructDefPtr def) : type(ValueType::STRUCT_DEF), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(def), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(StructInstancePtr inst) : type(ValueType::STRUCT), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(inst), boundMethod(nullptr) {}
+    Value(BoundMethodPtr bm) : type(ValueType::BOUND_METHOD), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(bm) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -146,6 +204,9 @@ struct Value {
     bool isNative() const { return type == ValueType::NATIVE; }
     bool isModule() const { return type == ValueType::MODULE; }
     bool isSlice() const { return type == ValueType::SLICE; }
+    bool isStruct() const { return type == ValueType::STRUCT; }
+    bool isStructDef() const { return type == ValueType::STRUCT_DEF; }
+    bool isBoundMethod() const { return type == ValueType::BOUND_METHOD; }
 
     double asFloat() const {
         if (type == ValueType::INT) return static_cast<double>(intVal);
@@ -155,29 +216,8 @@ struct Value {
 
     bool isFalsey() const;
 
-    bool isEqual(const Value& other) const {
-        if (isInt() && other.isInt()) return intVal == other.intVal;
-        if (isFloat() && other.isFloat()) return floatVal == other.floatVal;
-        if (isNumber() && other.isNumber()) {
-            return asFloat() == other.asFloat();
-        }
-        if (type != other.type) return false;
-        switch (type) {
-            case ValueType::NIL: return true;
-            case ValueType::BOOL: return boolean == other.boolean;
-            case ValueType::INT: return intVal == other.intVal;
-            case ValueType::FLOAT: return floatVal == other.floatVal;
-            case ValueType::CHAR: return charVal == other.charVal;
-            case ValueType::STRING: return str == other.str;
-            case ValueType::FUNCTION: return closure == other.closure;
-            case ValueType::ARRAY: return array == other.array;
-            case ValueType::MAP: return map == other.map;
-            case ValueType::MODULE: return module == other.module;
-            case ValueType::SLICE: return slice == other.slice;
-            case ValueType::NATIVE: return false;
-        }
-        return false;
-    }
+    bool isEqual(const Value& other) const;
+    bool isEqualCycleSafe(const Value& other, std::vector<std::pair<const void*, const void*>>& visited) const;
 
     std::string toString() const;
     std::string toStringCycleSafe(std::vector<const void*>& visited) const;
@@ -376,6 +416,7 @@ inline std::string TypeSpec::toString() const {
             return "map";
         case TypeKind::FUNC: return "func";
         case TypeKind::UNTYPED: return "untyped";
+        case TypeKind::STRUCT: return structName.empty() ? "struct" : structName;
     }
     return "any";
 }
@@ -484,7 +525,128 @@ inline std::string Value::toStringCycleSafe(std::vector<const void*>& visited) c
         visited.pop_back();
         return result;
     }
+    if (isStruct()) {
+        if (!structInstance || !structInstance->def) return "struct{nil}";
+        const void* ptr = static_cast<const void*>(structInstance.get());
+        if (std::find(visited.begin(), visited.end(), ptr) != visited.end()) {
+            return structInstance->def->name + "{...}";
+        }
+        visited.push_back(ptr);
+        std::string result = structInstance->def->name + "{";
+        for (size_t i = 0; i < structInstance->def->fields.size(); ++i) {
+            if (i > 0) result += ", ";
+            const std::string& fname = structInstance->def->fields[i].name;
+            result += fname + ": ";
+            auto it = structInstance->fields.find(fname);
+            Value fVal = (it != structInstance->fields.end()) ? it->second : Value();
+            if (fVal.isString()) {
+                result += "\"" + fVal.toStringCycleSafe(visited) + "\"";
+            } else if (fVal.isChar()) {
+                result += "'" + fVal.toStringCycleSafe(visited) + "'";
+            } else {
+                result += fVal.toStringCycleSafe(visited);
+            }
+        }
+        result += "}";
+        visited.pop_back();
+        return result;
+    }
     return "nil";
+}
+
+struct ObjBoundMethod {
+    Value receiver;
+    FunctionPtr method = nullptr;
+};
+
+inline bool Value::isEqual(const Value& other) const {
+    std::vector<std::pair<const void*, const void*>> visited;
+    return isEqualCycleSafe(other, visited);
+}
+
+inline bool Value::isEqualCycleSafe(const Value& other, std::vector<std::pair<const void*, const void*>>& visited) const {
+    if (isInt() && other.isInt()) return intVal == other.intVal;
+    if (isFloat() && other.isFloat()) return floatVal == other.floatVal;
+    if (isNumber() && other.isNumber()) {
+        return asFloat() == other.asFloat();
+    }
+    if (type != other.type) return false;
+    switch (type) {
+        case ValueType::NIL: return true;
+        case ValueType::BOOL: return boolean == other.boolean;
+        case ValueType::INT: return intVal == other.intVal;
+        case ValueType::FLOAT: return floatVal == other.floatVal;
+        case ValueType::CHAR: return charVal == other.charVal;
+        case ValueType::STRING: return str == other.str;
+        case ValueType::FUNCTION: return closure == other.closure;
+        case ValueType::MODULE: return module == other.module;
+        case ValueType::SLICE: return slice == other.slice;
+        case ValueType::STRUCT_DEF: return structDef == other.structDef;
+        case ValueType::BOUND_METHOD: return boundMethod == other.boundMethod;
+        case ValueType::NATIVE: return false;
+
+        case ValueType::ARRAY: {
+            if (array == other.array) return true;
+            if (!array || !other.array) return false;
+            if (array->size() != other.array->size()) return false;
+            const void* p1 = static_cast<const void*>(array.get());
+            const void* p2 = static_cast<const void*>(other.array.get());
+            if (p1 > p2) std::swap(p1, p2);
+            std::pair<const void*, const void*> pair(p1, p2);
+            if (std::find(visited.begin(), visited.end(), pair) != visited.end()) return true;
+            visited.push_back(pair);
+            bool same = true;
+            for (size_t i = 0; i < array->size(); ++i) {
+                if (!(*array)[i].isEqualCycleSafe((*other.array)[i], visited)) {
+                    same = false;
+                    break;
+                }
+            }
+            visited.pop_back();
+            return same;
+        }
+        case ValueType::MAP: {
+            if (map == other.map) return true;
+            if (!map || !other.map) return false;
+            if (map->keys.size() != other.map->keys.size()) return false;
+            const void* p1 = static_cast<const void*>(map.get());
+            const void* p2 = static_cast<const void*>(other.map.get());
+            if (p1 > p2) std::swap(p1, p2);
+            std::pair<const void*, const void*> pair(p1, p2);
+            if (std::find(visited.begin(), visited.end(), pair) != visited.end()) return true;
+            visited.push_back(pair);
+            bool same = true;
+            for (size_t i = 0; i < map->keys.size(); ++i) {
+                Value k = map->keys[i];
+                if (!other.map->contains(k)) { same = false; break; }
+                if (!map->get(k).isEqualCycleSafe(other.map->get(k), visited)) { same = false; break; }
+            }
+            visited.pop_back();
+            return same;
+        }
+        case ValueType::STRUCT: {
+            if (structInstance == other.structInstance) return true;
+            if (!structInstance || !other.structInstance) return false;
+            if (structInstance->def != other.structInstance->def) return false;
+            const void* p1 = static_cast<const void*>(structInstance.get());
+            const void* p2 = static_cast<const void*>(other.structInstance.get());
+            if (p1 > p2) std::swap(p1, p2);
+            std::pair<const void*, const void*> pair(p1, p2);
+            if (std::find(visited.begin(), visited.end(), pair) != visited.end()) return true;
+            visited.push_back(pair);
+            bool same = true;
+            for (const auto& f : structInstance->def->fields) {
+                auto it1 = structInstance->fields.find(f.name);
+                auto it2 = other.structInstance->fields.find(f.name);
+                Value v1 = (it1 != structInstance->fields.end()) ? it1->second : Value();
+                Value v2 = (it2 != other.structInstance->fields.end()) ? it2->second : Value();
+                if (!v1.isEqualCycleSafe(v2, visited)) { same = false; break; }
+            }
+            visited.pop_back();
+            return same;
+        }
+    }
+    return false;
 }
 
 inline TypeSpec Value::getTypeSpec() const {
@@ -496,5 +658,72 @@ inline TypeSpec Value::getTypeSpec() const {
     if (isArray()) return array ? array->typeSpec : TypeSpec{TypeKind::ARRAY};
     if (isMap()) return map ? map->typeSpec : TypeSpec{TypeKind::MAP};
     if (isFunction() || isNative()) return TypeSpec{TypeKind::FUNC};
+    if (isStruct()) {
+        TypeSpec spec;
+        spec.kind = TypeKind::STRUCT;
+        if (structInstance && structInstance->def) spec.structName = structInstance->def->name;
+        return spec;
+    }
     return TypeSpec{TypeKind::ANY};
+}
+
+inline Value cloneValue(const Value& val, std::unordered_map<const void*, Value>& cloned);
+
+inline Value cloneValue(const Value& val, std::unordered_map<const void*, Value>& cloned) {
+    if (val.isStruct()) {
+        if (!val.structInstance) return val;
+        const void* ptr = static_cast<const void*>(val.structInstance.get());
+        auto it = cloned.find(ptr);
+        if (it != cloned.end()) return it->second;
+
+        auto newInst = std::make_shared<ObjStructInstance>();
+        newInst->def = val.structInstance->def;
+        Value newVal(newInst);
+        cloned[ptr] = newVal;
+
+        for (const auto& pair : val.structInstance->fields) {
+            newInst->fields[pair.first] = cloneValue(pair.second, cloned);
+        }
+        return newVal;
+    }
+    if (val.isArray()) {
+        if (!val.array) return val;
+        const void* ptr = static_cast<const void*>(val.array.get());
+        auto it = cloned.find(ptr);
+        if (it != cloned.end()) return it->second;
+
+        auto newArray = std::make_shared<ObjArray>();
+        newArray->typeSpec = val.array->typeSpec;
+        Value newVal(newArray);
+        cloned[ptr] = newVal;
+
+        for (const Value& elem : val.array->elements) {
+            newArray->push_back(cloneValue(elem, cloned));
+        }
+        return newVal;
+    }
+    if (val.isMap()) {
+        if (!val.map) return val;
+        const void* ptr = static_cast<const void*>(val.map.get());
+        auto it = cloned.find(ptr);
+        if (it != cloned.end()) return it->second;
+
+        auto newMap = std::make_shared<ObjMap>();
+        newMap->typeSpec = val.map->typeSpec;
+        Value newVal(newMap);
+        cloned[ptr] = newVal;
+
+        for (const Value& k : val.map->keys) {
+            Value clonedKey = cloneValue(k, cloned);
+            Value clonedVal = cloneValue(val.map->get(k), cloned);
+            newMap->set(clonedKey, clonedVal);
+        }
+        return newVal;
+    }
+    return val;
+}
+
+inline Value cloneValue(const Value& val) {
+    std::unordered_map<const void*, Value> cloned;
+    return cloneValue(val, cloned);
 }

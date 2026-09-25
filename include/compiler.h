@@ -32,6 +32,7 @@ struct Loop {
 
 enum class FunctionType {
     TYPE_FUNCTION,
+    TYPE_METHOD,
     TYPE_SCRIPT
 };
 
@@ -58,6 +59,7 @@ private:
     std::unordered_map<std::string, bool> globalConsts;
     bool hasError = false;
     bool panicMode = false;
+    ObjStructDef* currentStructDef = nullptr;
     int expressionDepth = 0;
     static constexpr int MAX_EXPRESSION_DEPTH = 300;
 
@@ -84,6 +86,7 @@ private:
 
     uint16_t argumentList();
     TypeSpec parseTypeDeclaration();
+    void parseParameter(TypeSpec& outType, std::string& outName);
 
     void primary();
     void postfix();
@@ -99,6 +102,7 @@ private:
 
     void varDeclaration(bool isPublic = false);
     void taskDeclaration(bool isPublic = false);
+    void buildDeclaration(bool isPublic = false);
     void giveStatement();
     void blockStatement();
     void ifStatement();

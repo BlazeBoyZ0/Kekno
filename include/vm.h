@@ -28,6 +28,7 @@ private:
     Value peek(int distance);
 
     bool call(ClosurePtr closure, int argCount, const std::vector<std::string>& argNames, bool isGrab = false);
+    bool callOperatorOverload(const std::string& opSymbol, const Value& receiver, const Value& rightArg, bool isUnary);
     Value runCallback(Value cb, const std::vector<Value>& availableArgs, int maxAllowedParams);
     bool executeInstruction(OpCode instruction, CallFrame& frame);
     UpvaluePtr captureUpvalue(size_t stackIndex);
