@@ -12,7 +12,7 @@
 #include <algorithm>
 #include "chunk.h"
 
-enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE, STRUCT_DEF, STRUCT_INSTANCE };
+enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE, STRUCT_DEF, STRUCT_INSTANCE, BOUND_METHOD };
 
 enum class TypeKind {
     ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC, STRUCT
@@ -57,6 +57,7 @@ struct ObjModule;
 struct ObjSlice;
 struct ObjStructDef;
 struct ObjStructInstance;
+struct ObjBoundMethod;
 
 using UpvaluePtr = std::shared_ptr<ObjUpvalue>;
 using FunctionPtr = std::shared_ptr<ObjFunction>;
@@ -65,18 +66,34 @@ using ModulePtr = std::shared_ptr<ObjModule>;
 using SlicePtr = std::shared_ptr<ObjSlice>;
 using StructDefPtr = std::shared_ptr<ObjStructDef>;
 using StructInstancePtr = std::shared_ptr<ObjStructInstance>;
+using BoundMethodPtr = std::shared_ptr<ObjBoundMethod>;
 using NativeFn = std::function<Value(int argCount, Value* args, const std::vector<std::string>& argNames)>;
 
 struct StructField {
     std::string name;
     bool isConst = false;
+    bool isPublic = false;
     TypeSpec typeSpec;
+};
+
+struct StructMethod {
+    std::string name;
+    bool isPublic = false;
+    FunctionPtr function;
+};
+
+struct StructOperator {
+    std::string opSymbol;
+    FunctionPtr function;
 };
 
 struct ObjStructDef {
     std::string name;
     std::vector<StructField> fields;
     std::unordered_map<std::string, size_t> fieldIndices;
+    std::vector<StructMethod> methods;
+    std::unordered_map<std::string, size_t> methodIndices;
+    std::vector<StructOperator> operators;
     ModulePtr module = nullptr;
 };
 
@@ -144,8 +161,9 @@ struct Value {
     SlicePtr slice;
     StructDefPtr structDef;
     StructInstancePtr structInstance;
+    BoundMethodPtr boundMethod;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
     Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
     Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
     Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
@@ -159,7 +177,8 @@ struct Value {
     Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr), structDef(nullptr), structInstance(nullptr) {}
     Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl), structDef(nullptr), structInstance(nullptr) {}
     Value(StructDefPtr def) : type(ValueType::STRUCT_DEF), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(def), structInstance(nullptr) {}
-    Value(StructInstancePtr inst) : type(ValueType::STRUCT_INSTANCE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(inst) {}
+    Value(StructInstancePtr inst) : type(ValueType::STRUCT_INSTANCE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(inst), boundMethod(nullptr) {}
+    Value(BoundMethodPtr bm) : type(ValueType::BOUND_METHOD), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(bm) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -176,6 +195,7 @@ struct Value {
     bool isSlice() const { return type == ValueType::SLICE; }
     bool isStructDef() const { return type == ValueType::STRUCT_DEF; }
     bool isStructInstance() const { return type == ValueType::STRUCT_INSTANCE; }
+    bool isBoundMethod() const { return type == ValueType::BOUND_METHOD; }
 
     double asFloat() const {
         if (type == ValueType::INT) return static_cast<double>(intVal);
@@ -315,12 +335,18 @@ struct ObjFunction {
     std::vector<TypeSpec> paramTypes;
     std::vector<TypeSpec> localTypes;
     ModulePtr module = nullptr;
+    StructDefPtr structDef = nullptr;
 };
 
 struct ObjClosure {
     FunctionPtr function;
     std::vector<UpvaluePtr> upvalues;
     ModulePtr module = nullptr;
+};
+
+struct ObjBoundMethod {
+    Value receiver;
+    ClosurePtr method;
 };
 
 inline Value::Value(FunctionPtr fn)
@@ -574,6 +600,7 @@ inline bool Value::isEqualCycleSafe(const Value& other, std::vector<std::pair<co
         case ValueType::SLICE: return slice == other.slice;
         case ValueType::NATIVE: return false;
         case ValueType::STRUCT_DEF: return structDef == other.structDef;
+        case ValueType::BOUND_METHOD: return boundMethod == other.boundMethod;
         case ValueType::ARRAY: {
             if (array == other.array) return true;
             if (!array || !other.array) return false;

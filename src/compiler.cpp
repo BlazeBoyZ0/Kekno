@@ -1234,10 +1234,233 @@ void Compiler::structDeclaration(bool isPublic) {
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
     while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+        bool isPubMember = match(TokenType::PUB);
+        if (!isPubMember) {
+            match(TokenType::PRIV); // optional explicit 'priv'
+        }
+
+        if (current.type == TokenType::OPERATOR) {
+            advance(); // consume 'operator'
+            std::string opSym = current.text;
+            if (current.type != TokenType::PLUS && current.type != TokenType::MINUS &&
+                current.type != TokenType::STAR && current.type != TokenType::SLASH &&
+                current.type != TokenType::PERCENT && current.type != TokenType::CARET &&
+                current.type != TokenType::EQUAL_EQUAL && current.type != TokenType::BANG_EQUAL &&
+                current.type != TokenType::LESS && current.type != TokenType::LESS_EQUAL &&
+                current.type != TokenType::GREATER && current.type != TokenType::GREATER_EQUAL) {
+                errorAt(current, "Disallowed or invalid operator symbol '" + opSym + "'.", "Syntax Error");
+                return;
+            }
+            advance();
+
+            FunctionPtr opFn = std::make_shared<ObjFunction>();
+            opFn->name = "operator " + opSym;
+            opFn->structDef = structDef;
+            opFn->arity = 1; // 1 for implicit 'self'
+            opFn->paramNames.push_back("self");
+            opFn->paramTypes.push_back(TypeSpec{TypeKind::STRUCT, TypeKind::ANY, TypeKind::ANY, TypeKind::ANY, structName});
+
+            CompilerContext fnContext(opFn->chunk);
+            fnContext.enclosing = currentContext;
+            fnContext.function = opFn;
+            fnContext.type = FunctionType::TYPE_FUNCTION;
+            fnContext.scopeDepth = 1;
+
+            Local slot0;
+            slot0.name = "";
+            slot0.depth = 0;
+            fnContext.locals.push_back(slot0);
+
+            CompilerContext* parentContext = currentContext;
+            Loop* enclosingLoop = currentLoop;
+
+            {
+                currentContext = &fnContext;
+                currentLoop = nullptr;
+
+                addLocal("self", false, TypeSpec{TypeKind::STRUCT, TypeKind::ANY, TypeKind::ANY, TypeKind::ANY, structName});
+
+                consume(TokenType::LPAREN, "Expected '(' after operator symbol");
+                if (current.type != TokenType::RPAREN) {
+                    do {
+                        opFn->arity++;
+                        if (opFn->arity > 2) {
+                            error("Operator overload cannot declare more than 1 explicit parameter.", "Compiler Error");
+                        }
+                        if (current.type == TokenType::PUB || current.type == TokenType::PRIV) {
+                            error("Visibility modifiers ('pub'/'priv') are not allowed on task parameters.", "Compiler Error");
+                        }
+                        TypeSpec pSpec;
+                        std::string pName = "";
+                        if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::COLON) {
+                            pName = current.text;
+                            advance();
+                            advance();
+                            pSpec = parseTypeDeclaration();
+                        } else {
+                            if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
+                                current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
+                                current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
+                                current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC ||
+                                (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER)) {
+                                pSpec = parseTypeDeclaration();
+                            }
+                            if (current.type != TokenType::IDENTIFIER) {
+                                errorAt(current, "Expected parameter name", "Syntax Error");
+                            } else {
+                                pName = current.text;
+                                advance();
+                            }
+                        }
+                        opFn->paramTypes.push_back(pSpec);
+                        opFn->paramNames.push_back(pName);
+                        addLocal(pName, false, pSpec);
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RPAREN, "Expected ')' after parameters");
+                consume(TokenType::LBRACE, "Expected '{' before operator body");
+
+                while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                    statement();
+                }
+                consume(TokenType::RBRACE, "Expected '}' after operator body");
+
+                chunk().writeOp(OpCode::OP_NIL);
+                chunk().writeOp(OpCode::OP_RETURN);
+
+                opFn->localTypes = opFn->chunk.localTypes;
+
+                currentContext = parentContext;
+                currentLoop = enclosingLoop;
+            }
+
+            match(TokenType::TILDE); // optional '~' after operator declaration
+
+            StructOperator op;
+            op.opSymbol = opSym;
+            op.function = opFn;
+            structDef->operators.push_back(op);
+
+            continue;
+        }
+
+        if (current.type == TokenType::TASK) {
+            advance(); // consume 'task'
+            if (current.type != TokenType::IDENTIFIER) {
+                errorAt(current, "Expected method name after 'task'", "Syntax Error");
+                return;
+            }
+            std::string methodName = current.text;
+            advance();
+
+            if (structDef->methodIndices.find(methodName) != structDef->methodIndices.end()) {
+                error("Duplicate method name '" + methodName + "' in struct '" + structName + "'.", "Compiler Error");
+                return;
+            }
+            if (structDef->fieldIndices.find(methodName) != structDef->fieldIndices.end()) {
+                error("Member '" + methodName + "' already declared as a field in struct '" + structName + "'.", "Compiler Error");
+                return;
+            }
+
+            FunctionPtr methodFn = std::make_shared<ObjFunction>();
+            methodFn->name = methodName;
+            methodFn->structDef = structDef;
+            methodFn->arity = 1; // 1 for implicit 'self'
+            methodFn->paramNames.push_back("self");
+            methodFn->paramTypes.push_back(TypeSpec{TypeKind::STRUCT, TypeKind::ANY, TypeKind::ANY, TypeKind::ANY, structName});
+
+            CompilerContext fnContext(methodFn->chunk);
+            fnContext.enclosing = currentContext;
+            fnContext.function = methodFn;
+            fnContext.type = FunctionType::TYPE_FUNCTION;
+            fnContext.scopeDepth = 1;
+
+            Local slot0;
+            slot0.name = "";
+            slot0.depth = 0;
+            fnContext.locals.push_back(slot0);
+
+            CompilerContext* parentContext = currentContext;
+            Loop* enclosingLoop = currentLoop;
+
+            {
+                currentContext = &fnContext;
+                currentLoop = nullptr;
+
+                addLocal("self", false, TypeSpec{TypeKind::STRUCT, TypeKind::ANY, TypeKind::ANY, TypeKind::ANY, structName});
+
+                consume(TokenType::LPAREN, "Expected '(' after method name");
+                if (current.type != TokenType::RPAREN) {
+                    do {
+                        methodFn->arity++;
+                        if (methodFn->arity > 65535) {
+                            error("Cannot have more than 65,535 parameters.", "Compiler Error");
+                        }
+                        if (current.type == TokenType::PUB || current.type == TokenType::PRIV) {
+                            error("Visibility modifiers ('pub'/'priv') are not allowed on task parameters.", "Compiler Error");
+                        }
+                        TypeSpec pSpec;
+                        std::string pName = "";
+                        if (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::COLON) {
+                            pName = current.text;
+                            advance();
+                            advance();
+                            pSpec = parseTypeDeclaration();
+                        } else {
+                            if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
+                                current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
+                                current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
+                                current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC ||
+                                (current.type == TokenType::IDENTIFIER && lexer.peekToken().type == TokenType::IDENTIFIER)) {
+                                pSpec = parseTypeDeclaration();
+                            }
+                            if (current.type != TokenType::IDENTIFIER) {
+                                errorAt(current, "Expected parameter name", "Syntax Error");
+                            } else {
+                                pName = current.text;
+                                advance();
+                            }
+                        }
+                        methodFn->paramTypes.push_back(pSpec);
+                        methodFn->paramNames.push_back(pName);
+                        addLocal(pName, false, pSpec);
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RPAREN, "Expected ')' after parameters");
+                consume(TokenType::LBRACE, "Expected '{' before method body");
+
+                while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                    statement();
+                }
+                consume(TokenType::RBRACE, "Expected '}' after method body");
+
+                chunk().writeOp(OpCode::OP_NIL);
+                chunk().writeOp(OpCode::OP_RETURN);
+
+                methodFn->localTypes = methodFn->chunk.localTypes;
+
+                currentContext = parentContext;
+                currentLoop = enclosingLoop;
+            }
+
+            match(TokenType::TILDE); // optional '~' after method declaration
+
+            StructMethod m;
+            m.name = methodName;
+            m.isPublic = isPubMember;
+            m.function = methodFn;
+
+            size_t mIdx = structDef->methods.size();
+            structDef->methods.push_back(m);
+            structDef->methodIndices[methodName] = mIdx;
+
+            continue;
+        }
+
         bool isConst = match(TokenType::CONST);
         if (!isConst) {
             if (!match(TokenType::LET)) {
-                errorAt(current, "Expected 'let' or 'const' in field declaration", "Syntax Error");
+                errorAt(current, "Expected 'let', 'const', 'task', or 'operator' in field declaration", "Syntax Error");
                 return;
             }
         }
