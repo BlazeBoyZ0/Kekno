@@ -1173,8 +1173,8 @@ static void testV060StructsAndOperators() {
     // 2. Positional & named construction, missing fields default to nil
     std::string personCode =
         "build Person {\n"
-        "    const name : string~\n"
-        "    let age : int~\n"
+        "    pub const name : string~\n"
+        "    pub let age : int~\n"
         "}~\n"
         "let p1 = Person(\"BBZ\", 15)~\n"
         "echo p1.name~\n"
@@ -1209,17 +1209,17 @@ static void testV060StructsAndOperators() {
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Duplicate field") != std::string::npos, "duplicate field compile error");
 
     // 5. Const fields and const struct variable checks
-    out = runCodeFresh("build Person { const name : string~\n let age : int~ }~ let p = Person(\"A\", 10)~ p.name = \"B\"~", ok);
+    out = runCodeFresh("build Person { pub const name : string~\n pub let age : int~ }~ let p = Person(\"A\", 10)~ p.name = \"B\"~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("constant field") != std::string::npos, "reassigning const field error");
 
-    out = runCodeFresh("build Person { let name : string~\n let age : int~ }~ const p = Person(\"A\", 10)~ p.age = 20~", ok);
+    out = runCodeFresh("build Person { pub let name : string~\n pub let age : int~ }~ const p = Person(\"A\", 10)~ p.age = 20~", ok);
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("const variable") != std::string::npos, "mutating field of const struct variable compile error");
 
     // 6. Independent value copy semantics (assignment & parameters)
     std::string copyCode =
         "build Person {\n"
-        "    let name : string~\n"
-        "    let age : int~\n"
+        "    pub let name : string~\n"
+        "    pub let age : int~\n"
         "}~\n"
         "let p1 = Person(\"A\", 10)~\n"
         "let p2 = p1~\n"
@@ -1237,8 +1237,8 @@ static void testV060StructsAndOperators() {
     // 7. Structs in arrays and maps, with nested property updates
     std::string collectionCode =
         "build Person {\n"
-        "    let name : string~\n"
-        "    let age : int~\n"
+        "    pub let name : string~\n"
+        "    pub let age : int~\n"
         "}~\n"
         "let people : array<Person> = [\n"
         "    Person(\"A\", 15),\n"
@@ -1255,11 +1255,11 @@ static void testV060StructsAndOperators() {
     // 8. Methods, self keyword, and method calls
     std::string methodCode =
         "build Counter {\n"
-        "    let count : int~\n"
-        "    task increment() {\n"
+        "    pub let count : int~\n"
+        "    pub task increment() {\n"
         "        self.count = self.count + 1~\n"
         "    }\n"
-        "    task reset() {\n"
+        "    pub task reset() {\n"
         "        count = 0~\n"
         "    }\n"
         "}~\n"
@@ -1321,8 +1321,8 @@ static void testV060StructsAndOperators() {
     // 12. Operator overloading (binary +, -, ==, !=, unary -) and compound assignment
     std::string vecCode =
         "build Vec2 {\n"
-        "    let x : float~\n"
-        "    let y : float~\n"
+        "    pub let x : float~\n"
+        "    pub let y : float~\n"
         "    operator +(other : Vec2) {\n"
         "        give Vec2(self.x + other.x, self.y + other.y)~\n"
         "    }\n"
@@ -1354,8 +1354,8 @@ static void testV060StructsAndOperators() {
     // 13. Recursive struct types and cycle safety (equality, string conversion)
     std::string nodeCode =
         "build Node {\n"
-        "    let val : int~\n"
-        "    let next : Node~\n"
+        "    pub let val : int~\n"
+        "    pub let next : Node~\n"
         "}~\n"
         "let n1 = Node(1, nil)~\n"
         "let n2 = Node(2, n1)~\n"
@@ -1383,7 +1383,7 @@ static void test_v061_patch_features() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int struct construction rejected");
 
     // 4. float -> int field assignment rejection
-    out = runCodeFresh("build S { let x : int~ }~ let s = S(1)~ s.x = 2.0~", ok);
+    out = runCodeFresh("build S { pub let x : int~ }~ let s = S(1)~ s.x = 2.0~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int field assignment rejected");
 
     // 5. int -> float still allowed
@@ -1438,38 +1438,38 @@ static void test_v061_patch_features() {
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Unknown type 'Missing'") != std::string::npos, "unknown struct type in map rejected");
 
     // 9. deep const struct mutation rejection
-    out = runCodeFresh("build Person { let age : int~ }~ const p = Person(10)~ p.age = 20~", ok);
+    out = runCodeFresh("build Person { pub let age : int~ }~ const p = Person(10)~ p.age = 20~", ok);
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos, "direct field mutation of const struct rejected");
 
     // 10. const nested struct mutation rejection
-    out = runCodeFresh("build Inner { let x : int~ }~ build Outer { let inner : Inner~ }~ const o = Outer(Inner(1))~ o.inner.x = 2~", ok);
+    out = runCodeFresh("build Inner { pub let x : int~ }~ build Outer { pub let inner : Inner~ }~ const o = Outer(Inner(1))~ o.inner.x = 2~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const nested struct field mutation rejected");
 
     // 11. const nested array/map mutation rejection
-    out = runCodeFresh("build Person { let items : array~ }~ const p = Person([1])~ p.items.push(2)~", ok);
+    out = runCodeFresh("build Person { pub let items : array~ }~ const p = Person([1])~ p.items.push(2)~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const nested array method mutation rejected");
 
-    out = runCodeFresh("build Person { let m : map~ }~ const p = Person({})~ p.m.put(\"k\", 1)~", ok);
+    out = runCodeFresh("build Person { pub let m : map~ }~ const p = Person({})~ p.m.put(\"k\", 1)~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const nested map method mutation rejected");
 
     // 12. const receiver mutation through methods
-    out = runCodeFresh("build Person { let age : int~ task mutate() { self.age = 99~ } }~ const p = Person(20)~ p.mutate()~", ok);
+    out = runCodeFresh("build Person { pub let age : int~ pub task mutate() { self.age = 99~ } }~ const p = Person(20)~ p.mutate()~", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const receiver mutation through method rejected");
 
     // 13. read-only methods on const receivers still working
-    out = runCodeFresh("build Person { let age : int~ task getAge() { give self.age~ } }~ const p = Person(20)~ echo p.getAge()~", ok);
+    out = runCodeFresh("build Person { pub let age : int~ pub task getAge() { give self.age~ } }~ const p = Person(20)~ echo p.getAge()~", ok);
     TEST_ASSERT(ok && out.find("=> 20") != std::string::npos, "read-only methods on const receivers preserved");
 
     // 14. independent struct copies in arrays
-    out = runCodeFresh("build Pt { let x : int~ }~ let p = Pt(1)~ let arr = []~ arr.push(p)~ arr[0].x = 99~ echo p.x~ echo arr[0].x~", ok);
+    out = runCodeFresh("build Pt { pub let x : int~ }~ let p = Pt(1)~ let arr = []~ arr.push(p)~ arr[0].x = 99~ echo p.x~ echo arr[0].x~", ok);
     TEST_ASSERT(ok && out.find("=> 1\n=> 99") != std::string::npos, "independent struct copies in arrays");
 
     // 15. independent struct copies in maps
-    out = runCodeFresh("build Pt { let x : int~ }~ let p = Pt(1)~ let m = {}~ m[\"k\"] = p~ m[\"k\"].x = 88~ echo p.x~ echo m[\"k\"].x~", ok);
+    out = runCodeFresh("build Pt { pub let x : int~ }~ let p = Pt(1)~ let m = {}~ m[\"k\"] = p~ m[\"k\"].x = 88~ echo p.x~ echo m[\"k\"].x~", ok);
     TEST_ASSERT(ok && out.find("=> 1\n=> 88") != std::string::npos, "independent struct copies in maps");
 
     // 16. independent nested struct copies
-    out = runCodeFresh("build Inner { let x : int~ }~ build Outer { let inner : Inner~ }~ let i = Inner(1)~ let o = Outer(i)~ o.inner.x = 55~ echo i.x~ echo o.inner.x~", ok);
+    out = runCodeFresh("build Inner { pub let x : int~ }~ build Outer { pub let inner : Inner~ }~ let i = Inner(1)~ let o = Outer(i)~ o.inner.x = 55~ echo i.x~ echo o.inner.x~", ok);
     TEST_ASSERT(ok && out.find("=> 1\n=> 55") != std::string::npos, "independent nested struct copies");
 
     // 17. private access from same-module non-method code rejected
@@ -1493,7 +1493,7 @@ static void test_v061_patch_features() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("No matching operator overload '+'") != std::string::npos, "operator overload argument mismatch rejected without fallthrough");
 
     // 22. operator overload with float/int compatibility
-    out = runCodeFresh("build V { let x : float~ operator +(other : float) { give V(self.x + other)~ } }~ let v = V(1.0) + 2~ echo v.x~", ok);
+    out = runCodeFresh("build V { pub let x : float~ operator +(other : float) { give V(self.x + other)~ } }~ let v = V(1.0) + 2~ echo v.x~", ok);
     TEST_ASSERT(ok && out.find("=> 3.0") != std::string::npos, "operator overload allows int -> float coercion");
 
     // 23. explicit task return-type syntax rejected
@@ -1502,6 +1502,82 @@ static void test_v061_patch_features() {
 
     out = runCodeFresh("build S { task bar() : string { give \"hi\"~ } }~", ok);
     TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Task return type declarations are not supported") != std::string::npos, "explicit method return-type syntax rejected");
+}
+
+static void testDefaultPrivateMembers() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Default-private field read from top-level (same module) fails
+    out = runCodeFresh("build Secret { let val : int~ }~ let s = Secret(42)~ echo s.val~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private field 'val'") != std::string::npos, "default-private field read from top-level rejected");
+
+    // 2. Default-private field write from top-level (same module) fails
+    out = runCodeFresh("build Secret { let val : int~ }~ let s = Secret(42)~ s.val = 100~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private field 'val'") != std::string::npos, "default-private field write from top-level rejected");
+
+    // 3. Default-private method call from top-level (same module) fails
+    out = runCodeFresh("build Secret { task hidden() { give 42~ } }~ let s = Secret()~ s.hidden()~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private method 'hidden'") != std::string::npos, "default-private method call from top-level rejected");
+
+    // 4. Default-private field access from ordinary task in same module fails
+    out = runCodeFresh("build Secret { let val : int~ }~ task readVal(s : Secret) { echo s.val~ } readVal(Secret(42))~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private field 'val'") != std::string::npos, "default-private field access from ordinary task rejected");
+
+    // 5. Default-private method call from ordinary task in same module fails
+    out = runCodeFresh("build Secret { task hidden() { give 42~ } }~ task callHidden(s : Secret) { s.hidden()~ } callHidden(Secret())~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private method 'hidden'") != std::string::npos, "default-private method call from ordinary task rejected");
+
+    // 6. Default-private field and method access from external module fails
+    {
+        std::ofstream f("/tmp/mod_priv.kek");
+        f << "pub build SecretMod {\n"
+          << "    let secretField : int~\n"
+          << "    task secretMethod() { give secretField~\n }\n"
+          << "}~\n";
+        f.close();
+
+        out = runCodeFresh("grab /tmp/mod_priv as m~\n let r = m.SecretMod(100)~\n echo r.secretField~\n", ok);
+        TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private field 'secretField'") != std::string::npos, "external default-private field access rejected");
+
+        out = runCodeFresh("grab /tmp/mod_priv as m~\n let r = m.SecretMod(100)~\n r.secretMethod()~\n", ok);
+        TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private method 'secretMethod'") != std::string::npos, "external default-private method call rejected");
+
+        std::remove("/tmp/mod_priv.kek");
+    }
+
+    // 7. Explicit pub exposes fields and methods
+    std::string pubCode =
+        "build Exposed {\n"
+        "    pub let publicField : int~\n"
+        "    pub task publicMethod() { give publicField * 2~\n }\n"
+        "}~\n"
+        "let e = Exposed(21)~\n"
+        "echo e.publicField~\n"
+        "echo e.publicMethod()~\n";
+    out = runCodeFresh(pubCode, ok);
+    TEST_ASSERT(ok && out.find("=> 21\n=> 42") != std::string::npos, "explicit pub exposes fields and methods");
+
+    // 8. Same-type internal access to default-private fields and methods works
+    std::string sameTypeInternalCode =
+        "build InternalBox {\n"
+        "    let data : int~\n"
+        "    task getRawData() {\n"
+        "        give data~\n"
+        "    }\n"
+        "    pub task exposeData() {\n"
+        "        give self.getRawData()~\n"
+        "    }\n"
+        "    pub task compare(other : InternalBox) {\n"
+        "        give self.data > other.data and self.getRawData() > other.getRawData()~\n"
+        "    }\n"
+        "}~\n"
+        "let b1 = InternalBox(100)~\n"
+        "let b2 = InternalBox(50)~\n"
+        "echo b1.exposeData()~\n"
+        "echo b1.compare(b2)~\n";
+    out = runCodeFresh(sameTypeInternalCode, ok);
+    TEST_ASSERT(ok && out.find("=> 100\n=> true") != std::string::npos, "same-type internal access to default-private fields and methods works");
 }
 
 int main() {
@@ -1533,6 +1609,7 @@ int main() {
     testV059RegressionSuite();
     testV060StructsAndOperators();
     test_v061_patch_features();
+    testDefaultPrivateMembers();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;
