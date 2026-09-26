@@ -1342,7 +1342,7 @@ void Compiler::buildDeclaration(bool isPublic) {
     currentStructDef = structDef.get();
 
     while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
-        bool memberPub = true;
+        bool memberPub = false;
         if (match(TokenType::PUB)) {
             memberPub = true;
         } else if (match(TokenType::PRIV)) {
