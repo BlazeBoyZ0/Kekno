@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <memory>
 #include "lexer.h"
 #include "chunk.h"
@@ -57,6 +58,9 @@ private:
     CompilerContext* currentContext = nullptr;
     Loop* currentLoop = nullptr;
     std::unordered_map<std::string, bool> globalConsts;
+    std::unordered_set<std::string> declaredStructs;
+    std::unordered_set<std::string> compiledStructsInModule;
+    std::unordered_set<std::string> knownModulePrefixes;
     bool hasError = false;
     bool panicMode = false;
     ObjStructDef* currentStructDef = nullptr;

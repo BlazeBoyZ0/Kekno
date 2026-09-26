@@ -4,6 +4,45 @@
 Compiler::Compiler(const std::string& src, Chunk& targetChunk)
     : lexer(src), targetChunk(targetChunk) {
     targetChunk.source = src;
+
+    Lexer scanLexer(src);
+    Token tok = scanLexer.nextToken();
+    while (tok.type != TokenType::END_OF_FILE && tok.type != TokenType::ERROR) {
+        if (tok.type == TokenType::BUILD) {
+            tok = scanLexer.nextToken();
+            if (tok.type == TokenType::IDENTIFIER) {
+                declaredStructs.insert(tok.text);
+            }
+        } else if (tok.type == TokenType::GRAB) {
+            tok = scanLexer.nextToken();
+            std::string grabPath = "";
+            while (tok.type == TokenType::IDENTIFIER || tok.type == TokenType::SLASH || tok.type == TokenType::DOT) {
+                grabPath += tok.text;
+                tok = scanLexer.nextToken();
+            }
+            if (tok.type == TokenType::AS) {
+                tok = scanLexer.nextToken();
+                if (tok.type == TokenType::IDENTIFIER) {
+                    knownModulePrefixes.insert(tok.text);
+                }
+            } else if (!grabPath.empty()) {
+                size_t dotPos = grabPath.find('.');
+                if (dotPos != std::string::npos) {
+                    knownModulePrefixes.insert(grabPath.substr(0, dotPos));
+                } else {
+                    size_t slashPos = grabPath.rfind('/');
+                    if (slashPos != std::string::npos) {
+                        knownModulePrefixes.insert(grabPath.substr(slashPos + 1));
+                    } else {
+                        knownModulePrefixes.insert(grabPath);
+                    }
+                }
+            }
+        } else {
+            tok = scanLexer.nextToken();
+        }
+    }
+
     advance();
 }
 
@@ -379,9 +418,24 @@ TypeSpec Compiler::parseTypeDeclaration() {
             consume(TokenType::GREATER, "Expected '>' after map value type");
         }
     } else if (current.type == TokenType::IDENTIFIER) {
-        spec.kind = TypeKind::STRUCT;
-        spec.structName = current.text;
+        std::string fullName = current.text;
+        std::string rootName = current.text;
         advance();
+        while (match(TokenType::DOT)) {
+            if (current.type == TokenType::IDENTIFIER) {
+                fullName += "." + current.text;
+                advance();
+            }
+        }
+        if (declaredStructs.find(rootName) == declaredStructs.end() &&
+            knownModulePrefixes.find(rootName) == knownModulePrefixes.end() &&
+            (currentStructDef == nullptr || currentStructDef->name != rootName)) {
+            error("Unknown type '" + fullName + "'.", "Compiler Error");
+        }
+        spec.kind = TypeKind::STRUCT;
+        spec.structName = fullName;
+    } else {
+        errorAt(current, "Expected type declaration.", "Syntax Error");
     }
     return spec;
 }
@@ -535,21 +589,17 @@ void Compiler::primary() {
                         error("Visibility modifiers ('pub'/'priv') are not allowed on task parameters.", "Compiler Error");
                     }
                     TypeSpec pSpec;
-                    if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
-                        current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
-                        current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-                        current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
-                        pSpec = parseTypeDeclaration();
-                    }
-                    fn->paramTypes.push_back(pSpec);
-
                     std::string pName;
                     parseParameter(pSpec, pName);
+                    fn->paramTypes.push_back(pSpec);
                     fn->paramNames.push_back(pName);
                     addLocal(pName, false, pSpec);
                 } while (match(TokenType::COMMA));
             }
             consume(TokenType::RPAREN, "Expected ')' after parameters");
+            if (match(TokenType::COLON)) {
+                error("Task return type declarations are not supported.", "Compiler Error");
+            }
             consume(TokenType::LBRACE, "Expected '{' before task body");
 
             while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
@@ -940,6 +990,9 @@ void Compiler::varDeclaration(bool isPublic) {
 
     consume(TokenType::EQUAL, "Expected '=' after variable name");
     expression();
+    if (isConst) {
+        chunk().writeOp(OpCode::OP_MAKE_CONST);
+    }
     consume(TokenType::TILDE, "Every statement must end with '~'");
 
     if (currentContext->scopeDepth > 0) {
@@ -1028,21 +1081,17 @@ void Compiler::taskDeclaration(bool isPublic) {
                     error("Visibility modifiers ('pub'/'priv') are not allowed on task parameters.", "Compiler Error");
                 }
                 TypeSpec pSpec;
-                if (current.type == TokenType::TYPE_INT || current.type == TokenType::TYPE_FLOAT ||
-                    current.type == TokenType::TYPE_STRING || current.type == TokenType::TYPE_BOOL ||
-                    current.type == TokenType::TYPE_CHAR || current.type == TokenType::TYPE_ARRAY ||
-                    current.type == TokenType::TYPE_MAP || current.type == TokenType::TYPE_FUNC) {
-                    pSpec = parseTypeDeclaration();
-                }
-                fn->paramTypes.push_back(pSpec);
-
                 std::string pName;
                 parseParameter(pSpec, pName);
+                fn->paramTypes.push_back(pSpec);
                 fn->paramNames.push_back(pName);
                 addLocal(pName, false, pSpec);
             } while (match(TokenType::COMMA));
         }
         consume(TokenType::RPAREN, "Expected ')' after parameters");
+        if (match(TokenType::COLON)) {
+            error("Task return type declarations are not supported.", "Compiler Error");
+        }
         consume(TokenType::LBRACE, "Expected '{' before task body");
 
         while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
@@ -1277,6 +1326,12 @@ void Compiler::buildDeclaration(bool isPublic) {
     std::string structName = current.text;
     advance();
 
+    if (compiledStructsInModule.find(structName) != compiledStructsInModule.end()) {
+        error("Duplicate struct declaration '" + structName + "'.", "Compiler Error");
+        return;
+    }
+    compiledStructsInModule.insert(structName);
+
     consume(TokenType::LBRACE, "Expected '{' before struct body.");
 
     auto structDef = std::make_shared<ObjStructDef>();
@@ -1287,7 +1342,7 @@ void Compiler::buildDeclaration(bool isPublic) {
     currentStructDef = structDef.get();
 
     while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
-        bool memberPub = false;
+        bool memberPub = true;
         if (match(TokenType::PUB)) {
             memberPub = true;
         } else if (match(TokenType::PRIV)) {
@@ -1335,9 +1390,13 @@ void Compiler::buildDeclaration(bool isPublic) {
             if (structDef->findField(methodName) != -1) {
                 error("Method name '" + methodName + "' collides with an existing field in struct '" + structName + "'.", "Compiler Error");
             }
+            if (structDef->methods.find(methodName) != structDef->methods.end()) {
+                error("Duplicate method declaration '" + methodName + "' in struct '" + structName + "'.", "Compiler Error");
+            }
 
             FunctionPtr methodFn = std::make_shared<ObjFunction>();
             methodFn->name = methodName;
+            methodFn->isMethod = true;
             methodFn->module = currentContext->function ? currentContext->function->module : nullptr;
 
             CompilerContext fnContext(methodFn->chunk);
@@ -1400,7 +1459,7 @@ void Compiler::buildDeclaration(bool isPublic) {
                 }
                 consume(TokenType::RPAREN, "Expected ')' after parameters.");
                 if (match(TokenType::COLON)) {
-                    parseTypeDeclaration();
+                    error("Task return type declarations are not supported.", "Compiler Error");
                 }
                 consume(TokenType::LBRACE, "Expected '{' before method body.");
 
@@ -1442,6 +1501,7 @@ void Compiler::buildDeclaration(bool isPublic) {
 
             FunctionPtr opFn = std::make_shared<ObjFunction>();
             opFn->name = "operator " + opSymbol;
+            opFn->isMethod = true;
             opFn->module = currentContext->function ? currentContext->function->module : nullptr;
 
             CompilerContext fnContext(opFn->chunk);

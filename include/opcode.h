@@ -59,5 +59,6 @@ enum class OpCode : uint8_t {
     OP_NOT_EQUAL,
     OP_GREATER_EQUAL,
     OP_LESS_EQUAL,
+    OP_MAKE_CONST,
     OP_RETURN
 };

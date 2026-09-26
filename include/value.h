@@ -3,6 +3,7 @@
 #include <sstream>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <functional>
 #include <cstdint>
@@ -88,6 +89,7 @@ struct ObjArray {
     std::vector<Value> elements;
     TypeSpec typeSpec{TypeKind::ARRAY};
     int lockCount = 0;
+    bool isConst = false;
 
     void checkLock() const {
         if (lockCount > 0) {
@@ -152,6 +154,7 @@ struct ObjStructDef {
 struct ObjStructInstance {
     StructDefPtr def = nullptr;
     std::unordered_map<std::string, Value> fields;
+    bool isConst = false;
 };
 
 struct Value {
@@ -259,6 +262,7 @@ struct ObjMap {
     std::vector<Value> keys;
     TypeSpec typeSpec{TypeKind::MAP};
     int lockCount = 0;
+    bool isConst = false;
 
     void checkLock() const {
         if (lockCount > 0) {
@@ -342,6 +346,7 @@ struct ObjFunction {
     std::vector<TypeSpec> paramTypes;
     std::vector<TypeSpec> localTypes;
     ModulePtr module = nullptr;
+    bool isMethod = false;
 };
 
 struct ObjClosure {
@@ -726,4 +731,49 @@ inline Value cloneValue(const Value& val, std::unordered_map<const void*, Value>
 inline Value cloneValue(const Value& val) {
     std::unordered_map<const void*, Value> cloned;
     return cloneValue(val, cloned);
+}
+
+inline Value cloneStructValue(const Value& val) {
+    if (val.isStruct()) {
+        return cloneValue(val);
+    }
+    return val;
+}
+
+inline Value makeConst(Value val, std::unordered_set<const void*>& visited);
+
+inline Value makeConst(Value val, std::unordered_set<const void*>& visited) {
+    if (val.isStruct() && val.structInstance) {
+        const void* ptr = static_cast<const void*>(val.structInstance.get());
+        if (visited.find(ptr) != visited.end()) return val;
+        visited.insert(ptr);
+        val.structInstance->isConst = true;
+        for (auto& pair : val.structInstance->fields) {
+            makeConst(pair.second, visited);
+        }
+    } else if (val.isArray() && val.array) {
+        const void* ptr = static_cast<const void*>(val.array.get());
+        if (visited.find(ptr) != visited.end()) return val;
+        visited.insert(ptr);
+        val.array->isConst = true;
+        for (auto& elem : val.array->elements) {
+            makeConst(elem, visited);
+        }
+    } else if (val.isMap() && val.map) {
+        const void* ptr = static_cast<const void*>(val.map.get());
+        if (visited.find(ptr) != visited.end()) return val;
+        visited.insert(ptr);
+        val.map->isConst = true;
+        for (auto& pair : val.map->table) {
+            Value kVal = pair.first.val;
+            makeConst(kVal, visited);
+            makeConst(pair.second, visited);
+        }
+    }
+    return val;
+}
+
+inline Value makeConst(Value val) {
+    std::unordered_set<const void*> visited;
+    return makeConst(val, visited);
 }
