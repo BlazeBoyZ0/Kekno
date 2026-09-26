@@ -1129,8 +1129,8 @@ static void testV059RegressionSuite() {
     out = runCodeFresh("let m = {1: \"x\"}~\n let map<float, string> n = m~\n echo n.keys()~\n echo typeof(n.keys()[0])~\n", ok);
     TEST_ASSERT(ok && out.find("[1.0]") != std::string::npos && out.find("=> float") != std::string::npos, "int -> float map key coercion");
 
-    out = runCodeFresh("let m = {1.0: \"x\"}~\n let map<int, string> n = m~\n echo n.keys()~\n echo typeof(n.keys()[0])~\n", ok);
-    TEST_ASSERT(ok && out.find("[1]") != std::string::npos && out.find("=> int") != std::string::npos, "float -> int map key coercion when whole number");
+    out = runCodeFresh("let m = {1.0: \"x\"}~\n let map<int, string> n = m~\n", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int map key conversion rejected for float keys");
 
     out = runCodeFresh("let m = {1.5: \"x\"}~\n let map<int, string> n = m~\n", ok);
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int map key conversion rejected when non-whole number");
@@ -1280,7 +1280,7 @@ static void testV060StructsAndOperators() {
         "build Person {\n"
         "    priv let secret : int~\n"
         "    pub task setSecret(s : int) { secret = s~ }\n"
-        "    pub task compareSecret(Person other) : bool {\n"
+        "    pub task compareSecret(Person other) {\n"
         "        give self.secret > other.secret~\n"
         "    }\n"
         "}~\n"
@@ -1366,8 +1366,146 @@ static void testV060StructsAndOperators() {
     TEST_ASSERT(ok && out.find("=> 2\n=> 1") != std::string::npos && out.find("Node{val: 2, next: Node{val: 1, next: nil}}") != std::string::npos, "recursive struct and nested toString");
 }
 
+static void test_v061_patch_features() {
+    bool ok = false;
+    std::string out;
+
+    // 1. float -> int assignment rejection
+    out = runCodeFresh("let int x = 2.0~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int variable assignment rejected");
+
+    // 2. float -> int task argument rejection
+    out = runCodeFresh("task foo(x : int) {} foo(2.0)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int task argument rejected");
+
+    // 3. float -> int struct construction rejection
+    out = runCodeFresh("build S { let x : int~ }~ S(2.0)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int struct construction rejected");
+
+    // 4. float -> int field assignment rejection
+    out = runCodeFresh("build S { let x : int~ }~ let s = S(1)~ s.x = 2.0~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "float -> int field assignment rejected");
+
+    // 5. int -> float still allowed
+    out = runCodeFresh("let float x = 2~ task bar(y : float) { give y~ } echo bar(3)~", ok);
+    TEST_ASSERT(ok && out.find("=> 3.0") != std::string::npos, "int -> float coercion allowed");
+
+    // 6. distinct same-named structs across modules
+    {
+        std::ofstream fA("/tmp/modA.kek");
+        fA << "pub build Person { pub let name : string~ }~\n"
+           << "pub task makePerson() { give Person(\"A\")~ }\n";
+        fA.close();
+
+        std::ofstream fB("/tmp/modB.kek");
+        fB << "grab /tmp/modA as modA~\n"
+           << "pub build Person { pub let age : int~ }~\n"
+           << "pub task checkA(p : modA.Person) { give p.name~ }\n"
+           << "pub task checkB(p : Person) { give p.age~ }\n";
+        fB.close();
+
+        std::string testCode =
+            "grab /tmp/modA as modA~\n"
+            "grab /tmp/modB as modB~\n"
+            "let pa = modA.makePerson()~\n"
+            "echo modB.checkA(pa)~\n"
+            "let pb = modB.Person(20)~\n"
+            "echo modB.checkB(pb)~\n";
+        out = runCodeFresh(testCode, ok);
+        TEST_ASSERT(ok && out.find("=> A") != std::string::npos && out.find("=> 20") != std::string::npos, "distinct same-named structs across modules positive");
+
+        std::string badCode =
+            "grab /tmp/modA as modA~\n"
+            "grab /tmp/modB as modB~\n"
+            "let pa = modA.makePerson()~\n"
+            "modB.checkB(pa)~\n";
+        out = runCodeFresh(badCode, ok);
+        TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "distinct same-named structs mismatch rejected");
+
+        std::remove("/tmp/modA.kek");
+        std::remove("/tmp/modB.kek");
+    }
+
+    // 7. unknown struct type errors
+    out = runCodeFresh("build Person { let x : Missing~ }~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Unknown type 'Missing'") != std::string::npos, "unknown struct type in field rejected");
+
+    // 8. nested typed collection type errors
+    out = runCodeFresh("let array<Missing> arr = []~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Unknown type 'Missing'") != std::string::npos, "unknown struct type in array rejected");
+
+    out = runCodeFresh("let map<string, Missing> m = {}~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Unknown type 'Missing'") != std::string::npos, "unknown struct type in map rejected");
+
+    // 9. deep const struct mutation rejection
+    out = runCodeFresh("build Person { let age : int~ }~ const p = Person(10)~ p.age = 20~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos, "direct field mutation of const struct rejected");
+
+    // 10. const nested struct mutation rejection
+    out = runCodeFresh("build Inner { let x : int~ }~ build Outer { let inner : Inner~ }~ const o = Outer(Inner(1))~ o.inner.x = 2~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const nested struct field mutation rejected");
+
+    // 11. const nested array/map mutation rejection
+    out = runCodeFresh("build Person { let items : array~ }~ const p = Person([1])~ p.items.push(2)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const nested array method mutation rejected");
+
+    out = runCodeFresh("build Person { let m : map~ }~ const p = Person({})~ p.m.put(\"k\", 1)~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const nested map method mutation rejected");
+
+    // 12. const receiver mutation through methods
+    out = runCodeFresh("build Person { let age : int~ task mutate() { self.age = 99~ } }~ const p = Person(20)~ p.mutate()~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos, "const receiver mutation through method rejected");
+
+    // 13. read-only methods on const receivers still working
+    out = runCodeFresh("build Person { let age : int~ task getAge() { give self.age~ } }~ const p = Person(20)~ echo p.getAge()~", ok);
+    TEST_ASSERT(ok && out.find("=> 20") != std::string::npos, "read-only methods on const receivers preserved");
+
+    // 14. independent struct copies in arrays
+    out = runCodeFresh("build Pt { let x : int~ }~ let p = Pt(1)~ let arr = []~ arr.push(p)~ arr[0].x = 99~ echo p.x~ echo arr[0].x~", ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 99") != std::string::npos, "independent struct copies in arrays");
+
+    // 15. independent struct copies in maps
+    out = runCodeFresh("build Pt { let x : int~ }~ let p = Pt(1)~ let m = {}~ m[\"k\"] = p~ m[\"k\"].x = 88~ echo p.x~ echo m[\"k\"].x~", ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 88") != std::string::npos, "independent struct copies in maps");
+
+    // 16. independent nested struct copies
+    out = runCodeFresh("build Inner { let x : int~ }~ build Outer { let inner : Inner~ }~ let i = Inner(1)~ let o = Outer(i)~ o.inner.x = 55~ echo i.x~ echo o.inner.x~", ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 55") != std::string::npos, "independent nested struct copies");
+
+    // 17. private access from same-module non-method code rejected
+    out = runCodeFresh("build Person { priv let age : int~ }~ task checkAge(p : Person) { echo p.age~ } checkAge(Person(20))~", ok);
+    TEST_ASSERT(ok && out.find("[Module Error]") != std::string::npos && out.find("private field") != std::string::npos, "private access from non-method task rejected");
+
+    // 18. valid same-type private access preserved
+    out = runCodeFresh("build Person { priv let age : int~ pub task setAge(a : int) { age = a~ } pub task isOlder(other : Person) { give self.age > other.age~ } }~ let p1 = Person(0)~ p1.setAge(30)~ let p2 = Person(0)~ p2.setAge(20)~ echo p1.isOlder(p2)~", ok);
+    TEST_ASSERT(ok && out.find("=> true") != std::string::npos, "valid same-type private access preserved");
+
+    // 19. duplicate struct declarations rejected
+    out = runCodeFresh("build Person { let x : int~ }~ build Person { let y : int~ }~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Duplicate struct declaration") != std::string::npos, "duplicate struct declaration rejected");
+
+    // 20. duplicate method declarations rejected
+    out = runCodeFresh("build Foo { task bar() {} task bar() {} }~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Duplicate method declaration") != std::string::npos, "duplicate method declaration rejected");
+
+    // 21. operator overload type mismatch
+    out = runCodeFresh("build V { let x : int~ operator +(other : int) { give V(self.x + other)~ } }~ V(1) + \"x\"~", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("No matching operator overload '+'") != std::string::npos, "operator overload argument mismatch rejected without fallthrough");
+
+    // 22. operator overload with float/int compatibility
+    out = runCodeFresh("build V { let x : float~ operator +(other : float) { give V(self.x + other)~ } }~ let v = V(1.0) + 2~ echo v.x~", ok);
+    TEST_ASSERT(ok && out.find("=> 3.0") != std::string::npos, "operator overload allows int -> float coercion");
+
+    // 23. explicit task return-type syntax rejected
+    out = runCodeFresh("task foo() : int { give 10~ }", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Task return type declarations are not supported") != std::string::npos, "explicit task return-type syntax rejected");
+
+    out = runCodeFresh("build S { task bar() : string { give \"hi\"~ } }~", ok);
+    TEST_ASSERT(!ok && out.find("Compiler Error") != std::string::npos && out.find("Task return type declarations are not supported") != std::string::npos, "explicit method return-type syntax rejected");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.6.0 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.6.1 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
     testNumericAndArithmetic();
@@ -1394,6 +1532,7 @@ int main() {
     testV058NewFeaturesAndIntegrations();
     testV059RegressionSuite();
     testV060StructsAndOperators();
+    test_v061_patch_features();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;
