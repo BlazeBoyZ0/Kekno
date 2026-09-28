@@ -331,8 +331,13 @@ Token Lexer::nextToken() {
         else if (ident == "else") t.type = TokenType::ELSE;
         else if (ident == "while") t.type = TokenType::WHILE;
         else if (ident == "for") t.type = TokenType::FOR;
+        else if (ident == "in") t.type = TokenType::IN;
         else if (ident == "task") t.type = TokenType::TASK;
         else if (ident == "give") t.type = TokenType::GIVE;
+        else if (ident == "test") t.type = TokenType::TEST;
+        else if (ident == "flinch") t.type = TokenType::FLINCH;
+        else if (ident == "drop") t.type = TokenType::DROP;
+        else if (ident == "atlast") t.type = TokenType::ATLAST;
         else if (ident == "halt") t.type = TokenType::HALT;
         else if (ident == "skip") t.type = TokenType::SKIP;
         else if (ident == "grab") t.type = TokenType::GRAB;
