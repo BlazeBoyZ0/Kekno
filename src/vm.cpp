@@ -1622,7 +1622,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return raiseRuntimeError(msg);
                 }
             } else {
-                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
+                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
             }
             break;
         }
@@ -1713,7 +1713,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return raiseRuntimeError(msg);
                 }
             } else {
-                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
+                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
             }
             break;
         }
@@ -1726,8 +1726,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_SPREAD_ARG: {
             Value arrVal = pop();
             if (!arrVal.isArray() || !arrVal.array) {
-                std::cout << "[Runtime Error]: Spread operator requires an array." << std::endl;
-                return false;
+                return raiseRuntimeError("Spread operator requires an array.");
             }
             for (size_t i = 0; i < arrVal.array->size(); ++i) {
                 push((*arrVal.array)[i]);
@@ -1743,8 +1742,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 }
             }
             if (markerIdx == -1) {
-                std::cout << "[Runtime Error]: Invalid variable call stack." << std::endl;
-                return false;
+                return raiseRuntimeError("Invalid variable call stack.");
             }
             int totalArgCount = static_cast<int>(stack.size() - 1 - markerIdx);
             stack.erase(stack.begin() + markerIdx);
@@ -1761,12 +1759,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     stack.resize(stack.size() - totalArgCount - 1);
                     push(result);
                 } catch (const std::exception& ex) {
-                    std::cout << ex.what() << std::endl;
-                    return false;
+                    std::string msg = ex.what();
+                    if (msg.rfind("[Runtime Error]: ", 0) == 0) msg = msg.substr(17);
+                    return raiseRuntimeError(msg);
                 }
             } else {
-                std::cout << "[Runtime Error]: Can only call task values (got type " << callee.getTypeSpec().toString() << ")." << std::endl;
-                return false;
+                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
             }
             break;
         }
@@ -1786,8 +1784,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 }
             }
             if (markerIdx == -1) {
-                std::cout << "[Runtime Error]: Invalid variable call stack." << std::endl;
-                return false;
+                return raiseRuntimeError("Invalid variable call stack.");
             }
             int totalArgCount = static_cast<int>(stack.size() - 1 - markerIdx);
             stack.erase(stack.begin() + markerIdx);
@@ -1803,12 +1800,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     stack.resize(stack.size() - totalArgCount - 1);
                     push(result);
                 } catch (const std::exception& ex) {
-                    std::cout << ex.what() << std::endl;
-                    return false;
+                    std::string msg = ex.what();
+                    if (msg.rfind("[Runtime Error]: ", 0) == 0) msg = msg.substr(17);
+                    return raiseRuntimeError(msg);
                 }
             } else {
-                std::cout << "[Runtime Error]: Can only call task values (got type " << callee.getTypeSpec().toString() << ")." << std::endl;
-                return false;
+                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
             }
             break;
         }
