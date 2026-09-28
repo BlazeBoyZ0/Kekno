@@ -134,6 +134,16 @@ void Compiler::patchJump(int offset) {
     chunk().code[offset + 1] = static_cast<uint8_t>(jump & 0xff);
 }
 
+void Compiler::patchJumpTo(int offset, int targetIP) {
+    int jump = targetIP - offset - 2;
+    if (jump > 0xffff || jump < 0) {
+        error("Jump offset out of range.", "Compiler Error");
+        return;
+    }
+    chunk().code[offset] = static_cast<uint8_t>((jump >> 8) & 0xff);
+    chunk().code[offset + 1] = static_cast<uint8_t>(jump & 0xff);
+}
+
 void Compiler::emitLoop(int loopStart) {
     chunk().writeOp(OpCode::OP_LOOP);
     int jump = static_cast<int>(chunk().code.size() - loopStart + 2);
@@ -1248,6 +1258,7 @@ void Compiler::haltStatement() {
         }
     }
 
+    chunk().writeOp(OpCode::OP_HALT);
     int breakJump = emitJump(OpCode::OP_JUMP);
     currentLoop->breakJumps.push_back(breakJump);
 }
@@ -1269,6 +1280,7 @@ void Compiler::skipStatement() {
         }
     }
 
+    chunk().writeOp(OpCode::OP_SKIP);
     if (currentLoop->continueIP != -1) {
         emitLoop(currentLoop->continueIP);
     } else {
@@ -1664,25 +1676,44 @@ void Compiler::statement() {
     } else if (current.type == TokenType::WHILE) {
         whileStatement();
     } else if (current.type == TokenType::FOR) {
-        // Native For Loop Implementation
         advance(); // consume 'for'
-        beginScope();
+        beginScope(); // outer loop scope N+1
         consume(TokenType::LPAREN, "Expected '(' after 'for'");
 
-        // 1. Initializer
-        if (match(TokenType::TILDE)) {
-            // No initializer
-        } else if (current.type == TokenType::LET || current.type == TokenType::CONST) {
-            varDeclaration();
-        } else {
-            expression();
-            consume(TokenType::TILDE, "Expected '~' after loop initializer");
-            chunk().writeOp(OpCode::OP_POP);
+        bool isConst = match(TokenType::CONST);
+        if (!isConst) match(TokenType::LET);
+
+        if (current.type != TokenType::IDENTIFIER) {
+            errorAt(current, "Expected loop variable name.", "Syntax Error");
+            return;
         }
+        std::string itemName = current.text;
+        advance();
+
+        consume(TokenType::IN, "Expected 'in' after loop variable name");
+
+        expression();
+        if (match(TokenType::COLON)) {
+            expression(); // end
+            if (match(TokenType::COLON)) {
+                expression(); // step
+            } else {
+                emitConstant(Value(static_cast<int64_t>(1))); // default step 1
+            }
+            chunk().writeOp(OpCode::OP_BUILD_RANGE);
+        }
+
+        consume(TokenType::RPAREN, "Expected ')' after for clauses");
+
+        chunk().writeOp(OpCode::OP_ITER_INIT);
+
+        // Hidden local slot for iterator
+        addLocal("$iter", false, TypeSpec{TypeKind::ANY});
 
         Loop loop;
         loop.scopeDepth = currentContext->scopeDepth;
         loop.startIP = static_cast<int>(chunk().code.size());
+        loop.continueIP = loop.startIP;
         loop.enclosing = currentLoop;
         currentLoop = &loop;
 
@@ -1693,167 +1724,129 @@ void Compiler::statement() {
             ~LoopGuard() { *targetPtr = resetVal; }
         } loopGuard(&currentLoop, loop.enclosing);
 
-        // 2. Condition
-        int exitJump = -1;
-        if (!match(TokenType::TILDE)) {
-            expression();
-            consume(TokenType::TILDE, "Expected '~' after loop condition");
+        int exitJump = emitJump(OpCode::OP_ITER_NEXT);
 
-            exitJump = emitJump(OpCode::OP_JUMP_IF_FALSE);
-            chunk().writeOp(OpCode::OP_POP);
-        }
-
-        // 3. Increment clause
-        if (!match(TokenType::RPAREN)) {
-            int bodyJump = emitJump(OpCode::OP_JUMP);
-            int incrementStart = static_cast<int>(chunk().code.size());
-            loop.continueIP = incrementStart;
-
-            for (int cJump : loop.continueJumps) {
-                patchJump(cJump);
-            }
-            loop.continueJumps.clear();
-
-            // Expression or assignment statement for increment
-            expression();
-            if (current.type == TokenType::EQUAL || current.type == TokenType::PLUS_EQUAL ||
-                current.type == TokenType::MINUS_EQUAL || current.type == TokenType::STAR_EQUAL ||
-                current.type == TokenType::SLASH_EQUAL || current.type == TokenType::PERCENT_EQUAL) {
-                TokenType assignOp = current.type;
-                advance();
-
-                if (!chunk().code.empty() && static_cast<OpCode>(chunk().code.back()) == OpCode::OP_GET_INDEX) {
-                    chunk().code.pop_back();
-                    if (assignOp != TokenType::EQUAL) {
-                        chunk().writeOp(OpCode::OP_DUP_2);
-                        chunk().writeOp(OpCode::OP_GET_INDEX);
-                        expression();
-                        if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                        else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                        else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                        else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                        else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
-                    } else {
-                        expression();
-                    }
-                    chunk().writeOp(OpCode::OP_SET_INDEX);
-                    chunk().writeOp(OpCode::OP_POP);
-                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_MEMBER) {
-                    uint16_t memberIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                    chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
-                    if (assignOp != TokenType::EQUAL) {
-                        chunk().writeOp(OpCode::OP_DUP);
-                        chunk().writeOp(OpCode::OP_GET_MEMBER);
-                        chunk().write16(memberIdx);
-                        expression();
-                        if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                        else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                        else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                        else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                        else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
-                    } else {
-                        expression();
-                    }
-                    chunk().writeOp(OpCode::OP_SET_MEMBER);
-                    chunk().write16(memberIdx);
-                    chunk().writeOp(OpCode::OP_POP);
-                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
-                    uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                    chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
-
-                    if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].isConst) {
-                        error("Cannot reassign constant variable '" + currentContext->locals[localSlot].name + "'.", "Compiler Error");
-                    }
-
-                    if (assignOp != TokenType::EQUAL) {
-                        chunk().writeOp(OpCode::OP_GET_LOCAL);
-                        chunk().write16(localSlot);
-                        expression();
-                        if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                        else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                        else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                        else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                        else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
-                    } else {
-                        expression();
-                    }
-                    chunk().writeOp(OpCode::OP_SET_LOCAL);
-                    chunk().write16(localSlot);
-                    chunk().writeOp(OpCode::OP_POP);
-                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
-                    uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                    chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
-
-                    if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
-                        error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
-                    }
-
-                    if (assignOp != TokenType::EQUAL) {
-                        chunk().writeOp(OpCode::OP_GET_UPVALUE);
-                        chunk().write16(upvalueSlot);
-                        expression();
-                        if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                        else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                        else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                        else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                        else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
-                    } else {
-                        expression();
-                    }
-                    chunk().writeOp(OpCode::OP_SET_UPVALUE);
-                    chunk().write16(upvalueSlot);
-                    chunk().writeOp(OpCode::OP_POP);
-                } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
-                    uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                    chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
-
-                    std::string varName = chunk().constants[nameIdx].str;
-                    if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
-                        error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
-                    }
-
-                    if (assignOp != TokenType::EQUAL) {
-                        chunk().writeOp(OpCode::OP_GET_GLOBAL);
-                        chunk().write16(nameIdx);
-                        expression();
-                        if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                        else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                        else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                        else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                        else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
-                    } else {
-                        expression();
-                    }
-                    chunk().writeOp(OpCode::OP_SET_GLOBAL);
-                    chunk().write16(nameIdx);
-                    chunk().writeOp(OpCode::OP_POP);
-                }
-            } else {
-                chunk().writeOp(OpCode::OP_POP);
-            }
-
-            consume(TokenType::RPAREN, "Expected ')' after for clauses");
-
-            emitLoop(loop.startIP);
-            loop.startIP = incrementStart;
-            patchJump(bodyJump);
-        } else {
-            loop.continueIP = loop.startIP;
-        }
+        beginScope(); // inner loop body scope N+2
+        // Local slot for item variable at inner scope N+2
+        addLocal(itemName, isConst, TypeSpec{TypeKind::ANY});
 
         statement();
+        endScope(); // closes upvalues for itemName if captured by closures in body
+
         emitLoop(loop.startIP);
 
-        if (exitJump != -1) {
-            patchJump(exitJump);
-            chunk().writeOp(OpCode::OP_POP);
-        }
+        patchJump(exitJump);
 
         for (int breakJump : loop.breakJumps) {
             patchJump(breakJump);
         }
 
+        for (int cJump : loop.continueJumps) {
+            patchJump(cJump);
+        }
+
+        endScope(); // outer loop scope ended: pops itemName and $iter
+    } else if (current.type == TokenType::DROP) {
+        advance(); // consume 'drop'
+        expression();
+        consume(TokenType::TILDE, "Every statement must end with '~'");
+        chunk().writeOp(OpCode::OP_DROP);
+    } else if (current.type == TokenType::TEST) {
+        advance(); // consume 'test'
+
+        chunk().writeOp(OpCode::OP_PUSH_TRY);
+        int tryHeaderOffset = static_cast<int>(chunk().code.size());
+        // Write 4 bytes: 16-bit catchIP and 16-bit finallyIP placeholders
+        chunk().write16(0xffff);
+        chunk().write16(0xffff);
+
+        beginScope();
+        consume(TokenType::LBRACE, "Expected '{' before test block body");
+        while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+            statement();
+        }
+        consume(TokenType::RBRACE, "Expected '}' after test block body");
         endScope();
+
+        chunk().writeOp(OpCode::OP_POP_TRY);
+
+        int jumpTestEnd = emitJump(OpCode::OP_JUMP);
+
+        int catchStart = -1;
+        std::string errVarName = "";
+        bool hasFlinch = false;
+        int jumpFlinchEnd = -1;
+
+        if (match(TokenType::FLINCH)) {
+            hasFlinch = true;
+            catchStart = static_cast<int>(chunk().code.size());
+
+            if (match(TokenType::LPAREN)) {
+                bool isConstErr = match(TokenType::CONST);
+                if (!isConstErr) match(TokenType::LET);
+                if (current.type == TokenType::IDENTIFIER) {
+                    errVarName = current.text;
+                    advance();
+                }
+                if (match(TokenType::COLON)) {
+                    parseTypeDeclaration();
+                }
+                consume(TokenType::RPAREN, "Expected ')' after flinch error variable");
+            }
+
+            beginScope();
+            if (errVarName.empty()) errVarName = "$error";
+            addLocal(errVarName, false, TypeSpec{TypeKind::ANY});
+
+            consume(TokenType::LBRACE, "Expected '{' before flinch block body");
+            while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                statement();
+            }
+            consume(TokenType::RBRACE, "Expected '}' after flinch block body");
+            endScope();
+
+            jumpFlinchEnd = emitJump(OpCode::OP_JUMP);
+        }
+
+        int finallyStart = -1;
+        bool hasAtLast = false;
+
+        if (match(TokenType::ATLAST)) {
+            hasAtLast = true;
+            finallyStart = static_cast<int>(chunk().code.size());
+
+            beginScope();
+            consume(TokenType::LBRACE, "Expected '{' before atlast block body");
+            while (current.type != TokenType::RBRACE && current.type != TokenType::END_OF_FILE && !hasError) {
+                statement();
+            }
+            consume(TokenType::RBRACE, "Expected '}' after atlast block body");
+            endScope();
+
+            chunk().writeOp(OpCode::OP_END_FINALLY);
+        }
+
+        if (!hasFlinch && !hasAtLast) {
+            error("'test' statement must have at least 'flinch' or 'atlast'.", "Compiler Error");
+        }
+
+        consume(TokenType::TILDE, "Every statement must end with '~'");
+
+        int targetAfterTest = static_cast<int>(chunk().code.size());
+        int normalTarget = hasAtLast ? finallyStart : targetAfterTest;
+
+        patchJumpTo(jumpTestEnd, normalTarget);
+        if (jumpFlinchEnd != -1) {
+            patchJumpTo(jumpFlinchEnd, normalTarget);
+        }
+
+        uint16_t catchOff = (catchStart != -1) ? static_cast<uint16_t>(catchStart) : 0xffff;
+        uint16_t finallyOff = (finallyStart != -1) ? static_cast<uint16_t>(finallyStart) : 0xffff;
+
+        chunk().code[tryHeaderOffset] = static_cast<uint8_t>((catchOff >> 8) & 0xff);
+        chunk().code[tryHeaderOffset + 1] = static_cast<uint8_t>(catchOff & 0xff);
+        chunk().code[tryHeaderOffset + 2] = static_cast<uint8_t>((finallyOff >> 8) & 0xff);
+        chunk().code[tryHeaderOffset + 3] = static_cast<uint8_t>(finallyOff & 0xff);
     } else if (current.type == TokenType::LBRACE) {
         blockStatement();
     } else {

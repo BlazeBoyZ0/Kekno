@@ -307,9 +307,9 @@ static void testControlFlowForElseIfAndConst() {
     bool ok = false;
     std::string out;
 
-    // Native for loop
-    out = runCodeFresh("let sum = 0 ~ for (let i = 1 ~ i <= 5 ~ i += 1) { sum += i ~ } echo sum ~", ok);
-    TEST_ASSERT(ok && out.find("=> 15") != std::string::npos, "for loop sum");
+    // Native for in loop
+    out = runCodeFresh("let sum = 0 ~ for (let i in 1:6) { sum += i ~ } echo sum ~", ok);
+    TEST_ASSERT(ok && out.find("=> 15") != std::string::npos, "for in loop sum");
 
     // else if chain
     out = runCodeFresh("let x = 2 ~ if (x == 1) { echo \"one\" ~ } else if (x == 2) { echo \"two\" ~ } else { echo \"other\" ~ }", ok);
@@ -366,11 +366,11 @@ static void testHaltSkipScopeCleanup() {
     std::string out;
 
     // Halt inside nested block popping locals
-    out = runCodeFresh("let sum = 0 ~ for (let i = 0 ~ i < 5 ~ i += 1) { { let localA = 10 ~ if (i == 2) { halt ~ } } sum += i ~ } echo sum ~", ok);
+    out = runCodeFresh("let sum = 0 ~ for (let i in 0:5) { { let localA = 10 ~ if (i == 2) { halt ~ } } sum += i ~ } echo sum ~", ok);
     TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "halt scope cleanup");
 
     // Skip inside nested block popping locals
-    out = runCodeFresh("let sum = 0 ~ for (let i = 0 ~ i < 5 ~ i += 1) { { let localA = 10 ~ if (i == 2) { skip ~ } } sum += i ~ } echo sum ~", ok);
+    out = runCodeFresh("let sum = 0 ~ for (let i in 0:5) { { let localA = 10 ~ if (i == 2) { skip ~ } } sum += i ~ } echo sum ~", ok);
     TEST_ASSERT(ok && out.find("=> 8") != std::string::npos, "skip scope cleanup");
 }
 
@@ -977,7 +977,7 @@ static void testV059RegressionSuite() {
     // 1. Captured locals and halt / skip
     std::string closureHaltCode =
         "let getFn = nil~\n"
-        "for (let i = 0~ i < 5~ i += 1) {\n"
+        "for (let i in 0:5) {\n"
         "    let captured = i * 10~\n"
         "    task fn() { give captured~\n }\n"
         "    if (i == 2) {\n"
@@ -991,7 +991,7 @@ static void testV059RegressionSuite() {
 
     std::string closureSkipCode =
         "let fnList = []~\n"
-        "for (let i = 0~ i < 5~ i += 1) {\n"
+        "for (let i in 0:5) {\n"
         "    let captured = i * 10~\n"
         "    task fn() { give captured~\n }\n"
         "    fnList.push(fn)~\n"
@@ -1006,9 +1006,9 @@ static void testV059RegressionSuite() {
     std::string nestedCapturedCode =
         "task makeClosures() {\n"
         "    let funcs = []~\n"
-        "    for (let i = 0~ i < 3~ i += 1) {\n"
+        "    for (let i in 0:3) {\n"
         "        let x = i + 1~\n"
-        "        for (let j = 0~ j < 2~ j += 1) {\n"
+        "        for (let j in 0:2) {\n"
         "            let y = (j + 1) * 100~\n"
         "            task closure() { give x + y~\n }\n"
         "            funcs.push(closure)~\n"
@@ -1580,10 +1580,272 @@ static void testDefaultPrivateMembers() {
     TEST_ASSERT(ok && out.find("=> 100\n=> true") != std::string::npos, "same-type internal access to default-private fields and methods works");
 }
 
+static void testV062ForInAndRanges() {
+    bool ok = false;
+    std::string out;
+
+    // Array iteration
+    out = runCodeFresh("let arr = [10, 20, 30] ~ for (let x in arr) { echo x ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> 10\n=> 20\n=> 30") != std::string::npos, "for in array iteration");
+
+    // Empty array iteration
+    out = runCodeFresh("let count = 0 ~ for (let x in []) { count++ ~ } echo count ~", ok);
+    TEST_ASSERT(ok && out.find("=> 0") != std::string::npos, "for in empty array zero iterations");
+
+    // String Unicode iteration
+    out = runCodeFresh("for (let c in \"👋 Kekno\") { echo c ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> 👋\n=>  \n=> K") != std::string::npos, "for in unicode string iteration");
+
+    // Empty string iteration
+    out = runCodeFresh("let count = 0 ~ for (let c in \"\") { count++ ~ } echo count ~", ok);
+    TEST_ASSERT(ok && out.find("=> 0") != std::string::npos, "for in empty string zero iterations");
+
+    // Map entry iteration (.key and .value)
+    out = runCodeFresh("let m = {\"a\": 1, \"b\": 2} ~ for (let entry in m) { echo entry.key ~ echo entry.value ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> a\n=> 1\n=> b\n=> 2") != std::string::npos, "for in map entry key and value");
+
+    // Modifying local map entry does not mutate original map
+    out = runCodeFresh("let m = {\"a\": 1} ~ for (let entry in m) { entry.value = 99 ~ } echo m[\"a\"] ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "modifying local map entry does not mutate original map");
+
+    // Ranges
+    out = runCodeFresh("for (let i in 0:10:2) { echo i ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> 0\n=> 2\n=> 4\n=> 6\n=> 8") != std::string::npos, "range 0:10:2");
+
+    out = runCodeFresh("for (let i in 10:0:-2) { echo i ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> 10\n=> 8\n=> 6\n=> 4\n=> 2") != std::string::npos, "range 10:0:-2");
+
+    out = runCodeFresh("for (let i in 0:5) { echo i ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> 0\n=> 1\n=> 2\n=> 3\n=> 4") != std::string::npos, "range default step 1");
+
+    // Expression-based range
+    out = runCodeFresh("let start = 1 ~ let end = 5 ~ for (let i in start : end) { echo i ~ }", ok);
+    TEST_ASSERT(ok && out.find("=> 1\n=> 2\n=> 3\n=> 4") != std::string::npos, "expression-based range");
+
+    // Zero-step range error
+    out = runCodeFresh("for (let i in 0:5:0) { echo i ~ }", ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Step cannot be zero") != std::string::npos, "range step zero runtime error");
+
+    // Wrong direction range -> 0 iterations
+    out = runCodeFresh("let count = 0 ~ for (let i in 0:10:-1) { count++ ~ } echo count ~", ok);
+    TEST_ASSERT(ok && out.find("=> 0") != std::string::npos, "wrong direction range zero iterations");
+
+    // Independent closure bindings created inside loops
+    std::string loopClosureCode =
+        "let fnList = [] ~\n"
+        "for (let i in 0:3) {\n"
+        "    task f() { give i ~ }\n"
+        "    fnList.push(f) ~\n"
+        "}\n"
+        "echo fnList[0]() ~\n"
+        "echo fnList[1]() ~\n"
+        "echo fnList[2]() ~\n";
+    out = runCodeFresh(loopClosureCode, ok);
+    TEST_ASSERT(ok && out.find("=> 0\n=> 1\n=> 2") != std::string::npos, "loop variable independent closure bindings per iteration");
+
+    // halt and skip in for ... in
+    out = runCodeFresh("let sum = 0 ~ for (let i in 0:10) { if (i == 3) { skip ~ } if (i == 6) { halt ~ } sum += i ~ } echo sum ~", ok);
+    TEST_ASSERT(ok && out.find("=> 12") != std::string::npos, "halt and skip in for in loop");
+
+    // halt and skip inside nested task boundary must not cross boundary
+    std::string boundaryCode =
+        "let sum = 0 ~\n"
+        "for (let i in 0:5) {\n"
+        "    task inner() {\n"
+        "        let x = 10 ~\n"
+        "    }\n"
+        "    inner() ~\n"
+        "    sum += i ~\n"
+        "}\n"
+        "echo sum ~\n";
+    out = runCodeFresh(boundaryCode, ok);
+    TEST_ASSERT(ok && out.find("=> 10") != std::string::npos, "loop with task boundary execution");
+}
+
+static void testV062ErrorHandling() {
+    bool ok = false;
+    std::string out;
+
+    // Basic test / flinch with user dropped string
+    out = runCodeFresh("test { drop \"failed\" ~ } flinch (let err) { echo err ~ }~", ok);
+    TEST_ASSERT(ok && out.find("=> failed") != std::string::npos, "test flinch drop string");
+
+    // User dropped int, bool, struct
+    out = runCodeFresh("test { drop 404 ~ } flinch (let err) { echo err ~ }~", ok);
+    TEST_ASSERT(ok && out.find("=> 404") != std::string::npos, "test flinch drop int");
+
+    out = runCodeFresh("test { drop false ~ } flinch (let err) { echo err ~ }~", ok);
+    TEST_ASSERT(ok && out.find("=> false") != std::string::npos, "test flinch drop bool");
+
+    out = runCodeFresh("build E { pub let code : int ~ }~ test { drop E(500) ~ } flinch (let err) { echo err.code ~ }~", ok);
+    TEST_ASSERT(ok && out.find("=> 500") != std::string::npos, "test flinch drop struct");
+
+    // Catching VM-generated runtime errors (e.g. division by zero)
+    out = runCodeFresh("test { let x = 1 / 0 ~ } flinch (let err) { echo err.message ~ echo err.type ~ }~", ok);
+    TEST_ASSERT(ok && out.find("Division by zero!") != std::string::npos && out.find("Runtime Error") != std::string::npos, "test flinch catch VM division by zero error");
+
+    // Catching OOB array index
+    out = runCodeFresh("test { let a = [1] ~ echo a[5] ~ } flinch (let err) { echo err.message ~ }~", ok);
+    TEST_ASSERT(ok && out.find("out of bounds") != std::string::npos, "test flinch catch OOB array index error");
+
+    // Error propagation through tasks and closures
+    std::string taskErrCode =
+        "task throwErr() { drop \"task error\" ~ }\n"
+        "task caller() { throwErr() ~ }\n"
+        "test {\n"
+        "    caller() ~\n"
+        "} flinch (let err) {\n"
+        "    echo err ~\n"
+        "}~\n";
+    out = runCodeFresh(taskErrCode, ok);
+    TEST_ASSERT(ok && out.find("=> task error") != std::string::npos, "error propagation through nested task calls");
+
+    // Error propagation through map/filter/reduce callbacks
+    out = runCodeFresh("test { [1, 2].map(task(x) { if (x == 2) { drop \"callback error\" ~ } give x ~ }) ~ } flinch (let err) { echo err ~ }~", ok);
+    TEST_ASSERT(ok && out.find("=> callback error") != std::string::npos, "error propagation through callback execution");
+
+    // atlast on normal completion
+    out = runCodeFresh("test { echo \"in test\" ~ } atlast { echo \"in atlast\" ~ }~", ok);
+    TEST_ASSERT(ok && out.find("in test") != std::string::npos && out.find("in atlast") != std::string::npos && out.find("in test") < out.find("in atlast"), "atlast runs on normal completion");
+
+    // atlast after give
+    std::string atlastGiveCode =
+        "task foo() {\n"
+        "    test {\n"
+        "        give \"return val\" ~\n"
+        "    } atlast {\n"
+        "        echo \"cleanup\" ~\n"
+        "    }~\n"
+        "}\n"
+        "echo foo() ~\n";
+    out = runCodeFresh(atlastGiveCode, ok);
+    TEST_ASSERT(ok && out.find("cleanup\n=> return val") != std::string::npos, "atlast runs before give return");
+
+    // atlast after drop
+    std::string atlastDropCode =
+        "test {\n"
+        "    test {\n"
+        "        drop \"err val\" ~\n"
+        "    } atlast {\n"
+        "        echo \"inner cleanup\" ~\n"
+        "    }~\n"
+        "} flinch (let err) {\n"
+        "    echo err ~\n"
+        "}~\n";
+    out = runCodeFresh(atlastDropCode, ok);
+    TEST_ASSERT(ok && out.find("inner cleanup\n=> err val") != std::string::npos, "atlast runs before drop propagates to flinch");
+
+    // atlast after halt
+    std::string atlastHaltCode =
+        "let sum = 0 ~\n"
+        "for (let i in 0:5) {\n"
+        "    test {\n"
+        "        if (i == 2) { halt ~ }\n"
+        "        sum += i ~\n"
+        "    } atlast {\n"
+        "        echo \"halt cleanup\" ~\n"
+        "    }~\n"
+        "}\n"
+        "echo sum ~\n";
+    out = runCodeFresh(atlastHaltCode, ok);
+    TEST_ASSERT(ok && out.find("halt cleanup\n=> 1") != std::string::npos, "atlast runs before halt breaks loop");
+
+    // atlast after skip
+    std::string atlastSkipCode =
+        "let sum = 0 ~\n"
+        "for (let i in 0:3) {\n"
+        "    test {\n"
+        "        if (i == 1) { skip ~ }\n"
+        "        sum += i ~\n"
+        "    } atlast {\n"
+        "        echo \"skip cleanup\" ~\n"
+        "    }~\n"
+        "}\n"
+        "echo sum ~\n";
+    out = runCodeFresh(atlastSkipCode, ok);
+    TEST_ASSERT(ok && out.find("skip cleanup") != std::string::npos && out.find("=> 2") != std::string::npos, "atlast runs before skip continues loop");
+
+    // nested atlast blocks with return
+    std::string nestedAtlastReturnCode =
+        "task testNestedAtlast() {\n"
+        "    test {\n"
+        "        test {\n"
+        "            give \"nested result\" ~\n"
+        "        } atlast {\n"
+        "            echo \"inner atlast\" ~\n"
+        "        }~\n"
+        "    } atlast {\n"
+        "        echo \"outer atlast\" ~\n"
+        "    }~\n"
+        "}\n"
+        "echo testNestedAtlast() ~\n";
+    out = runCodeFresh(nestedAtlastReturnCode, ok);
+    TEST_ASSERT(ok && out.find("inner atlast\n=> outer atlast\n=> nested result") != std::string::npos, "nested atlast blocks run in sequence during return");
+
+    // Replacement error in flinch
+    std::string replaceFlinchCode =
+        "test {\n"
+        "    test {\n"
+        "        drop \"first error\" ~\n"
+        "    } flinch (let err) {\n"
+        "        drop \"replaced error\" ~\n"
+        "    }~\n"
+        "} flinch (let err) {\n"
+        "    echo err ~\n"
+        "}~\n";
+    out = runCodeFresh(replaceFlinchCode, ok);
+    TEST_ASSERT(ok && out.find("=> replaced error") != std::string::npos, "flinch replaces error with new drop");
+
+    // Upvalue closing during error unwinding
+    std::string upvalueUnwindCode =
+        "let getX = nil ~\n"
+        "test {\n"
+        "    let x = 42 ~\n"
+        "    task captured() { give x ~ }\n"
+        "    getX = captured ~\n"
+        "    drop \"fail\" ~\n"
+        "} flinch (let err) {\n"
+        "    echo getX() ~\n"
+        "}~\n";
+    out = runCodeFresh(upvalueUnwindCode, ok);
+    TEST_ASSERT(ok && out.find("=> 42") != std::string::npos, "upvalue closed correctly during error unwinding");
+}
+
+static void testV062CallableConsistency() {
+    bool ok = false;
+    std::string out;
+
+    // Bound method used as variable call
+    std::string boundMethodVarCode =
+        "build Greeter {\n"
+        "    pub let prefix : string ~\n"
+        "    pub task greet(name) { give self.prefix + \" \" + name ~ }\n"
+        "}~\n"
+        "let g = Greeter(\"Hello\") ~\n"
+        "let fn = g.greet ~\n"
+        "echo fn(\"World\") ~\n";
+    out = runCodeFresh(boundMethodVarCode, ok);
+    TEST_ASSERT(ok && out.find("Hello World") != std::string::npos, "bound method used in variable call");
+
+    // Bound method passed as callback to map()
+    std::string boundMethodCbCode =
+        "build Doubler {\n"
+        "    pub let factor : int ~\n"
+        "    pub task mult(x) { give x * self.factor ~ }\n"
+        "}~\n"
+        "let d = Doubler(10) ~\n"
+        "echo [1, 2, 3].map(d.mult) ~\n";
+    out = runCodeFresh(boundMethodCbCode, ok);
+    TEST_ASSERT(ok && out.find("[10, 20, 30]") != std::string::npos, "bound method passed as callback to map()");
+}
+
 int main() {
-    std::cout << "Running Kekno v0.6.1 Complete Test Suite..." << std::endl;
+    std::cout << "Running Kekno v0.6.2 Complete Test Suite..." << std::endl;
 
     testNativeFunctionsAndMath();
+    testV062ForInAndRanges();
+    testV062ErrorHandling();
+    testV062CallableConsistency();
     testNumericAndArithmetic();
     testArrayMethods();
     testMapMethods();

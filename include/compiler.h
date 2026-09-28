@@ -79,6 +79,7 @@ private:
 
     int emitJump(OpCode op);
     void patchJump(int offset);
+    void patchJumpTo(int offset, int targetIP);
     void emitLoop(int loopStart);
 
     void beginScope();

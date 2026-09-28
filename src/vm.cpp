@@ -289,11 +289,125 @@ Value VM::peek(int distance) {
 void VM::resetStack() {
     stack.clear();
     frames.clear();
+    tryHandlers.clear();
+    pendingControlFlow = PendingControlFlow{};
     openUpvalues = nullptr;
     moduleCache.clear();
     loadingStackPaths.clear();
     loadingStackNames.clear();
     rootModule = nullptr;
+    wasErrorUnwound = false;
+    uncaughtErrorPrinted = false;
+}
+
+Value VM::makeRuntimeErrorObject(const std::string& message, const std::string& typeName) {
+    auto inst = std::make_shared<ObjStructInstance>();
+    inst->def = runtimeErrorDef;
+
+    int line = 0;
+    int column = 0;
+    std::string loc = "";
+
+    std::stringstream tb;
+    for (int i = static_cast<int>(frames.size()) - 1; i >= 0; i--) {
+        CallFrame& frame = frames[i];
+        FunctionPtr function = frame.closure->function;
+        size_t instruction = (frame.ip > function->chunk.code.data()) ? (frame.ip - function->chunk.code.data() - 1) : 0;
+        int l = function->chunk.getLine(instruction);
+        int c = function->chunk.getColumn(instruction);
+        std::string fnName = function->name.empty() ? "<script>" : function->name;
+
+        if (i == static_cast<int>(frames.size()) - 1) {
+            line = l;
+            column = c;
+            loc = (function->module && !function->module->name.empty()) ? function->module->name : "main";
+        }
+
+        tb << "  at " << fnName << "() [line " << l << ", col " << c << "]\n";
+        if (!function->chunk.source.empty()) {
+            std::string lineStr = Lexer(function->chunk.source).getLineString(l);
+            if (!lineStr.empty()) {
+                tb << "    " << lineStr << "\n";
+                tb << "    ";
+                int colIdx = c > 1 ? c - 1 : 0;
+                for (int col = 0; col < colIdx; col++) {
+                    if (col < static_cast<int>(lineStr.size()) && lineStr[col] == '\t') tb << "\t";
+                    else tb << " ";
+                }
+                tb << "^\n";
+            }
+        }
+    }
+
+    inst->fields["type"] = Value(typeName);
+    inst->fields["message"] = Value(message);
+    inst->fields["line"] = Value(static_cast<int64_t>(line));
+    inst->fields["column"] = Value(static_cast<int64_t>(column));
+    inst->fields["location"] = Value(loc);
+    inst->fields["traceback"] = Value(tb.str());
+
+    return Value(inst);
+}
+
+bool VM::unwindError(Value errorVal, bool isRuntimeError) {
+    while (!tryHandlers.empty()) {
+        ExceptionHandler handler = tryHandlers.back();
+        tryHandlers.pop_back();
+
+        if (handler.frameIndex >= frames.size()) {
+            continue;
+        }
+
+        while (frames.size() - 1 > handler.frameIndex) {
+            closeUpvalues(frames.back().slotsOffset);
+            frames.pop_back();
+        }
+
+        CallFrame& targetFrame = frames.back();
+
+        closeUpvalues(handler.stackDepth);
+        stack.resize(handler.stackDepth);
+
+        wasErrorUnwound = true;
+        if (handler.catchIP != 0xffff) {
+            push(errorVal);
+            targetFrame.ip = targetFrame.closure->function->chunk.code.data() + handler.catchIP;
+            return true;
+        } else if (handler.finallyIP != 0xffff) {
+            pendingControlFlow.kind = isRuntimeError ? PendingKind::RUNTIME_ERROR : PendingKind::DROP;
+            pendingControlFlow.value = errorVal;
+            targetFrame.ip = targetFrame.closure->function->chunk.code.data() + handler.finallyIP;
+            return true;
+        }
+    }
+
+    if (!uncaughtErrorPrinted) {
+        uncaughtErrorPrinted = true;
+        if (isRuntimeError && errorVal.isStruct() && errorVal.structInstance && errorVal.structInstance->def == runtimeErrorDef) {
+            std::string typeName = errorVal.structInstance->fields["type"].str;
+            std::string msg = errorVal.structInstance->fields["message"].str;
+            std::string tb = errorVal.structInstance->fields["traceback"].str;
+            std::cout << "[" << typeName << "]: " << msg << std::endl;
+            std::cout << tb;
+        } else {
+            std::cout << "[Uncaught Error]: " << errorVal.toString() << std::endl;
+        }
+    }
+    return false;
+}
+
+bool VM::raiseRuntimeError(const std::string& message, const std::string& typeName) {
+    if (uncaughtErrorPrinted) return false;
+    Value errObj = makeRuntimeErrorObject(message, typeName);
+    return unwindError(errObj, true);
+}
+
+bool VM::runtimeError(const std::string& message, const std::string& typeName) {
+    std::string msg = message;
+    if (msg.rfind("[Runtime Error]: ", 0) == 0) {
+        msg = msg.substr(17);
+    }
+    return raiseRuntimeError(msg, typeName);
 }
 
 static bool checkAndCoerceValueType(const TypeSpec& expected, Value& val, ModulePtr currentModule = nullptr);
@@ -478,29 +592,65 @@ Value VM::runCallback(Value cb, const std::vector<Value>& availableArgs, int max
         std::vector<Value> args(availableArgs.begin(), availableArgs.begin() + count);
         return cb.nativeFn(count, args.data(), emptyNames);
     }
-    if (!cb.isFunction() || !cb.closure || !cb.closure->function) {
+
+    ClosurePtr closureToCall = nullptr;
+    int totalArgsToPush = 0;
+    std::vector<Value> argsToPush;
+
+    if (cb.isBoundMethod()) {
+        BoundMethodPtr bm = cb.boundMethod;
+        closureToCall = std::make_shared<ObjClosure>();
+        closureToCall->function = bm->method;
+        closureToCall->module = bm->method->module ? bm->method->module : (frames.empty() ? nullptr : frames.back().closure->module);
+
+        int fnArity = bm->method->arity; // includes self
+        int userArity = fnArity - 1;
+        if (userArity > maxAllowedParams) {
+            throw std::runtime_error("[Runtime Error]: Callback declares more parameters (" +
+                                     std::to_string(userArity) + ") than available (" + std::to_string(maxAllowedParams) + ").");
+        }
+
+        argsToPush.push_back(bm->receiver);
+        for (int i = 0; i < userArity; ++i) {
+            if (i < static_cast<int>(availableArgs.size())) {
+                argsToPush.push_back(availableArgs[i]);
+            } else {
+                argsToPush.push_back(Value());
+            }
+        }
+        totalArgsToPush = fnArity;
+    } else if (cb.isFunction() && cb.closure && cb.closure->function) {
+        closureToCall = cb.closure;
+        FunctionPtr fn = cb.closure->function;
+        int arity = fn->arity;
+        if (arity > maxAllowedParams) {
+            throw std::runtime_error("[Runtime Error]: Callback declares more parameters (" +
+                                     std::to_string(arity) + ") than available (" + std::to_string(maxAllowedParams) + ").");
+        }
+
+        for (int i = 0; i < arity; ++i) {
+            if (i < static_cast<int>(availableArgs.size())) {
+                argsToPush.push_back(availableArgs[i]);
+            } else {
+                argsToPush.push_back(Value());
+            }
+        }
+        totalArgsToPush = arity;
+    } else {
         throw std::runtime_error("[Runtime Error]: Callback must be a task.");
     }
 
-    FunctionPtr fn = cb.closure->function;
-    int arity = fn->arity;
-    if (arity > maxAllowedParams) {
-        throw std::runtime_error("[Runtime Error]: Callback declares more parameters (" +
-                                   std::to_string(arity) + ") than available (" + std::to_string(maxAllowedParams) + ").");
-    }
-
     size_t initialFrameCount = frames.size();
-    push(cb);
-    for (int i = 0; i < arity; ++i) {
-        if (i < static_cast<int>(availableArgs.size())) {
-            push(availableArgs[i]);
-        } else {
-            push(Value()); // nil
-        }
+    push(Value(closureToCall));
+    for (const Value& arg : argsToPush) {
+        push(arg);
     }
 
     std::vector<std::string> emptyNames;
-    if (!call(cb.closure, arity, emptyNames)) {
+    if (!call(closureToCall, totalArgsToPush, emptyNames)) {
+        if (wasErrorUnwound) {
+            throw std::runtime_error("[CallbackUnwound]");
+        }
         throw std::runtime_error("[Runtime Error]: Callback invocation failed.");
     }
 
@@ -508,8 +658,15 @@ Value VM::runCallback(Value cb, const std::vector<Value>& availableArgs, int max
         CallFrame& frame = frames.back();
         OpCode instruction = static_cast<OpCode>(*frame.ip++);
         if (!executeInstruction(instruction, frame)) {
+            if (wasErrorUnwound) {
+                throw std::runtime_error("[CallbackUnwound]");
+            }
             throw std::runtime_error("[Runtime Error]: Error during callback execution.");
         }
+    }
+
+    if (wasErrorUnwound) {
+        throw std::runtime_error("[CallbackUnwound]");
     }
 
     return pop();
@@ -853,6 +1010,22 @@ ModulePtr VM::loadModule(const std::string& modulePathStr, const std::string& re
 }
 
 VM::VM() {
+    mapEntryDef = std::make_shared<ObjStructDef>();
+    mapEntryDef->name = "MapEntry";
+    mapEntryDef->isPublic = true;
+    mapEntryDef->fields.push_back(ObjStructDef::FieldInfo{"key", TypeSpec{TypeKind::ANY}, false, true});
+    mapEntryDef->fields.push_back(ObjStructDef::FieldInfo{"value", TypeSpec{TypeKind::ANY}, false, true});
+
+    runtimeErrorDef = std::make_shared<ObjStructDef>();
+    runtimeErrorDef->name = "RuntimeError";
+    runtimeErrorDef->isPublic = true;
+    runtimeErrorDef->fields.push_back(ObjStructDef::FieldInfo{"type", TypeSpec{TypeKind::STRING}, false, true});
+    runtimeErrorDef->fields.push_back(ObjStructDef::FieldInfo{"message", TypeSpec{TypeKind::STRING}, false, true});
+    runtimeErrorDef->fields.push_back(ObjStructDef::FieldInfo{"line", TypeSpec{TypeKind::INT}, false, true});
+    runtimeErrorDef->fields.push_back(ObjStructDef::FieldInfo{"column", TypeSpec{TypeKind::INT}, false, true});
+    runtimeErrorDef->fields.push_back(ObjStructDef::FieldInfo{"location", TypeSpec{TypeKind::STRING}, false, true});
+    runtimeErrorDef->fields.push_back(ObjStructDef::FieldInfo{"traceback", TypeSpec{TypeKind::STRING}, false, true});
+
     builtins["size"] = Value(NativeFn([](int argCount, Value* args, const std::vector<std::string>& argNames) -> Value {
         ArgMap aMap = parseCallArgs(argCount, args, argNames, {{"val", "coll"}}, "size()");
         if (!aMap.has("val")) throw std::runtime_error("[Runtime Error]: size() expects 1 argument.");
@@ -949,6 +1122,7 @@ VM::VM() {
             case ValueType::STRUCT: return Value(val.structInstance && val.structInstance->def ? val.structInstance->def->name : std::string("struct"));
             case ValueType::BOUND_METHOD: return Value(std::string("func"));
             case ValueType::STRUCT_DEF: return Value(std::string("struct_def"));
+            case ValueType::ITERATOR: return Value(std::string("iterator"));
         }
         return Value(std::string("nil"));
     });
@@ -1394,8 +1568,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 int posCount = argCount;
 
                 if (posCount > totalFields) {
-                    std::cout << "[Runtime Error]: Too many positional arguments for constructor of '" << sDef->name << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Too many positional arguments for constructor of '" + sDef->name + "'.");
                 }
 
                 std::vector<Value> fieldValues(totalFields, Value());
@@ -1409,8 +1582,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     Value& fieldVal = fieldValues[i];
                     if (i < posCount && !fieldVal.isNil()) {
                         if (!checkAndCoerceValueType(fInfo.typeSpec, fieldVal, sDef->module ? sDef->module : frame.closure->module)) {
-                            std::cout << "[Runtime Error]: Type mismatch for field '" << fInfo.name << "' in constructor of '" << sDef->name << "': expected " << fInfo.typeSpec.toString() << " but got " << fieldVal.getTypeSpec().toString() << "." << std::endl;
-                            return false;
+                            return raiseRuntimeError("Type mismatch for field '" + fInfo.name + "' in constructor of '" + sDef->name + "': expected " + fInfo.typeSpec.toString() + " but got " + fieldVal.getTypeSpec().toString() + ".");
                         }
                     }
                     instance->fields[fInfo.name] = fieldVal;
@@ -1441,12 +1613,16 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     stack.resize(stack.size() - argCount - 1);
                     push(result);
                 } catch (const std::exception& ex) {
-                    std::cout << ex.what() << std::endl;
-                    return false;
+                    if (wasErrorUnwound || std::string(ex.what()) == "[CallbackUnwound]") {
+                        wasErrorUnwound = false;
+                        return true;
+                    }
+                    std::string msg = ex.what();
+                    if (msg.rfind("[Runtime Error]: ", 0) == 0) msg = msg.substr(17);
+                    return raiseRuntimeError(msg);
                 }
             } else {
-                std::cout << "[Runtime Error]: Can only call task values (got type " << callee.getTypeSpec().toString() << ")." << std::endl;
-                return false;
+                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
             }
             break;
         }
@@ -1468,8 +1644,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 int posCount = argCount - namedCount;
 
                 if (posCount > totalFields) {
-                    std::cout << "[Runtime Error]: Too many positional arguments for constructor of '" << sDef->name << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Too many positional arguments for constructor of '" + sDef->name + "'.");
                 }
 
                 std::vector<bool> fieldSet(totalFields, false);
@@ -1485,12 +1660,10 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     const std::string& fieldName = argNames[k];
                     int fIdx = sDef->findField(fieldName);
                     if (fIdx == -1) {
-                        std::cout << "[Runtime Error]: Unknown named argument '" << fieldName << "' in constructor of '" << sDef->name << "'." << std::endl;
-                        return false;
+                        return raiseRuntimeError("Unknown named argument '" + fieldName + "' in constructor of '" + sDef->name + "'.");
                     }
                     if (fieldSet[fIdx]) {
-                        std::cout << "[Runtime Error]: Duplicate argument for field '" << fieldName << "' in constructor of '" << sDef->name << "'." << std::endl;
-                        return false;
+                        return raiseRuntimeError("Duplicate argument for field '" + fieldName + "' in constructor of '" + sDef->name + "'.");
                     }
                     fieldValues[fIdx] = cloneValue(stack[stackArgsStart + posCount + k]);
                     fieldSet[fIdx] = true;
@@ -1501,8 +1674,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     Value& fieldVal = fieldValues[i];
                     if (fieldSet[i] && !fieldVal.isNil()) {
                         if (!checkAndCoerceValueType(fInfo.typeSpec, fieldVal, sDef->module ? sDef->module : frame.closure->module)) {
-                            std::cout << "[Runtime Error]: Type mismatch for field '" << fInfo.name << "' in constructor of '" << sDef->name << "': expected " << fInfo.typeSpec.toString() << " but got " << fieldVal.getTypeSpec().toString() << "." << std::endl;
-                            return false;
+                            return raiseRuntimeError("Type mismatch for field '" + fInfo.name + "' in constructor of '" + sDef->name + "': expected " + fInfo.typeSpec.toString() + " but got " + fieldVal.getTypeSpec().toString() + ".");
                         }
                     }
                     instance->fields[fInfo.name] = fieldVal;
@@ -1532,12 +1704,16 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     stack.resize(stack.size() - argCount - 1);
                     push(result);
                 } catch (const std::exception& ex) {
-                    std::cout << ex.what() << std::endl;
-                    return false;
+                    if (wasErrorUnwound || std::string(ex.what()) == "[CallbackUnwound]") {
+                        wasErrorUnwound = false;
+                        return true;
+                    }
+                    std::string msg = ex.what();
+                    if (msg.rfind("[Runtime Error]: ", 0) == 0) msg = msg.substr(17);
+                    return raiseRuntimeError(msg);
                 }
             } else {
-                std::cout << "[Runtime Error]: Can only call task values (got type " << callee.getTypeSpec().toString() << ")." << std::endl;
-                return false;
+                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
             }
             break;
         }
@@ -2432,6 +2608,244 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             push(makeConst(val));
             break;
         }
+        case OpCode::OP_BUILD_RANGE: {
+            Value stepVal = pop();
+            Value endVal = pop();
+            Value startVal = pop();
+
+            SlicePtr slice = std::make_shared<ObjSlice>();
+            slice->start = startVal;
+            slice->end = endVal;
+            slice->step = stepVal;
+            slice->hasStart = true;
+            slice->hasEnd = true;
+            slice->hasStep = true;
+
+            push(Value(slice));
+            break;
+        }
+        case OpCode::OP_ITER_INIT: {
+            Value target = pop();
+            auto iter = std::make_shared<ObjIterator>();
+
+            if (target.isArray()) {
+                if (target.array) {
+                    iter->items = target.array->elements;
+                }
+            } else if (target.isString()) {
+                std::vector<std::string> chars = utf8_to_chars(target.str);
+                for (const auto& cStr : chars) {
+                    iter->items.push_back(Value(utf8_code_point(cStr), true));
+                }
+            } else if (target.isMap()) {
+                if (target.map) {
+                    for (const Value& k : target.map->keys) {
+                        Value v = target.map->get(k);
+                        auto entryInst = std::make_shared<ObjStructInstance>();
+                        entryInst->def = mapEntryDef;
+                        entryInst->fields["key"] = k;
+                        entryInst->fields["value"] = v;
+                        iter->items.push_back(Value(entryInst));
+                    }
+                }
+            } else if (target.isSlice()) {
+                SlicePtr slice = target.slice;
+                Value startVal = slice->hasStart ? slice->start : Value(static_cast<int64_t>(0));
+                Value endVal = slice->hasEnd ? slice->end : Value(static_cast<int64_t>(0));
+                Value stepVal = slice->hasStep ? slice->step : Value(static_cast<int64_t>(1));
+
+                if (!startVal.isNumber() || !endVal.isNumber() || !stepVal.isNumber()) {
+                    raiseRuntimeError("Range start, end, and step must be numbers.");
+                    return false;
+                }
+
+                if (stepVal.asFloat() == 0.0) {
+                    raiseRuntimeError("Step cannot be zero.");
+                    return false;
+                }
+
+                bool isFloatRange = startVal.isFloat() || endVal.isFloat() || stepVal.isFloat();
+                if (!isFloatRange) {
+                    int64_t start = startVal.intVal;
+                    int64_t end = endVal.intVal;
+                    int64_t step = stepVal.intVal;
+
+                    if (step > 0) {
+                        for (int64_t i = start; i < end; i += step) {
+                            iter->items.push_back(Value(i));
+                        }
+                    } else {
+                        for (int64_t i = start; i > end; i += step) {
+                            iter->items.push_back(Value(i));
+                        }
+                    }
+                } else {
+                    double start = startVal.asFloat();
+                    double end = endVal.asFloat();
+                    double step = stepVal.asFloat();
+
+                    if (step > 0) {
+                        for (double f = start; f < end; f += step) {
+                            iter->items.push_back(Value(f));
+                        }
+                    } else {
+                        for (double f = start; f > end; f += step) {
+                            iter->items.push_back(Value(f));
+                        }
+                    }
+                }
+            } else {
+                raiseRuntimeError("Value of type '" + target.getTypeSpec().toString() + "' is not iterable.");
+                return false;
+            }
+
+            push(Value(iter));
+            break;
+        }
+        case OpCode::OP_ITER_NEXT: {
+            uint16_t jumpOffset = read16(frame.ip);
+            Value iterVal = peek(0);
+            if (!iterVal.isIterator() || !iterVal.iterator) {
+                raiseRuntimeError("Invalid iterator state.");
+                return false;
+            }
+            IteratorPtr iter = iterVal.iterator;
+            if (iter->index >= iter->items.size()) {
+                frame.ip += jumpOffset;
+            } else {
+                Value nextItem = iter->items[iter->index++];
+                push(nextItem);
+            }
+            break;
+        }
+        case OpCode::OP_PUSH_TRY: {
+            uint16_t catchIP = read16(frame.ip);
+            uint16_t finallyIP = read16(frame.ip);
+            ExceptionHandler handler;
+            handler.catchIP = catchIP;
+            handler.finallyIP = finallyIP;
+            handler.frameIndex = frames.size() - 1;
+            handler.stackDepth = stack.size();
+            tryHandlers.push_back(handler);
+            break;
+        }
+        case OpCode::OP_POP_TRY: {
+            if (!tryHandlers.empty()) {
+                tryHandlers.pop_back();
+            }
+            break;
+        }
+        case OpCode::OP_DROP: {
+            Value droppedVal = pop();
+            if (!unwindError(droppedVal, false)) {
+                return false;
+            }
+            break;
+        }
+        case OpCode::OP_HALT: {
+            if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+                ExceptionHandler handler = tryHandlers.back();
+                tryHandlers.pop_back();
+
+                const uint8_t* codeStart = frame.closure->function->chunk.code.data();
+                const uint8_t* jumpIp = frame.ip; // points at OP_JUMP instruction following OP_HALT
+                int jumpTarget = -1;
+                if (*jumpIp == static_cast<uint8_t>(OpCode::OP_JUMP)) {
+                    uint16_t offset = (static_cast<uint16_t>(jumpIp[1]) << 8) | jumpIp[2];
+                    jumpTarget = static_cast<int>((jumpIp - codeStart) + 3 + offset);
+                }
+
+                pendingControlFlow.kind = PendingKind::HALT;
+                pendingControlFlow.jumpIP = jumpTarget;
+
+                size_t targetDepth = std::min(stack.size(), handler.stackDepth);
+                closeUpvalues(targetDepth);
+                stack.resize(targetDepth);
+                frame.ip = codeStart + handler.finallyIP;
+            }
+            break;
+        }
+        case OpCode::OP_SKIP: {
+            if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+                ExceptionHandler handler = tryHandlers.back();
+                tryHandlers.pop_back();
+
+                const uint8_t* codeStart = frame.closure->function->chunk.code.data();
+                const uint8_t* jumpIp = frame.ip; // points at OP_JUMP or OP_LOOP instruction following OP_SKIP
+                int jumpTarget = -1;
+                if (*jumpIp == static_cast<uint8_t>(OpCode::OP_JUMP)) {
+                    uint16_t offset = (static_cast<uint16_t>(jumpIp[1]) << 8) | jumpIp[2];
+                    jumpTarget = static_cast<int>((jumpIp - codeStart) + 3 + offset);
+                } else if (*jumpIp == static_cast<uint8_t>(OpCode::OP_LOOP)) {
+                    uint16_t offset = (static_cast<uint16_t>(jumpIp[1]) << 8) | jumpIp[2];
+                    jumpTarget = static_cast<int>((jumpIp - codeStart) + 3 - offset);
+                }
+
+                pendingControlFlow.kind = PendingKind::SKIP;
+                pendingControlFlow.jumpIP = jumpTarget;
+
+                size_t targetDepth = std::min(stack.size(), handler.stackDepth);
+                closeUpvalues(targetDepth);
+                stack.resize(targetDepth);
+                frame.ip = codeStart + handler.finallyIP;
+            }
+            break;
+        }
+        case OpCode::OP_END_FINALLY: {
+            if (pendingControlFlow.kind != PendingKind::NONE) {
+                PendingControlFlow flow = pendingControlFlow;
+                pendingControlFlow = PendingControlFlow{};
+
+                if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+                    ExceptionHandler handler = tryHandlers.back();
+                    tryHandlers.pop_back();
+
+                    pendingControlFlow = flow;
+
+                    closeUpvalues(handler.stackDepth);
+                    stack.resize(handler.stackDepth);
+                    frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
+                    break;
+                }
+
+                if (flow.kind == PendingKind::RETURN) {
+                    push(flow.value);
+                    size_t slotsOffset = frame.slotsOffset;
+                    bool wasGrab = frame.isGrab;
+                    ModulePtr frameMod = frame.closure->module;
+                    closeUpvalues(slotsOffset);
+                    frames.pop_back();
+                    if (frames.empty()) {
+                        pop();
+                        if (!loadingStackPaths.empty()) {
+                            loadingStackPaths.pop_back();
+                            loadingStackNames.pop_back();
+                        }
+                        if (frameMod) frameMod->isInitialized = true;
+                        return true;
+                    }
+                    stack.resize(slotsOffset);
+                    if (wasGrab) {
+                        if (!loadingStackPaths.empty()) {
+                            loadingStackPaths.pop_back();
+                            loadingStackNames.pop_back();
+                        }
+                        if (frameMod) frameMod->isInitialized = true;
+                    } else {
+                        push(flow.value);
+                    }
+                } else if (flow.kind == PendingKind::DROP) {
+                    if (!unwindError(flow.value, false)) return false;
+                } else if (flow.kind == PendingKind::RUNTIME_ERROR) {
+                    if (!unwindError(flow.value, true)) return false;
+                } else if (flow.kind == PendingKind::HALT || flow.kind == PendingKind::SKIP) {
+                    if (flow.jumpIP != -1) {
+                        frame.ip = frame.closure->function->chunk.code.data() + flow.jumpIP;
+                    }
+                }
+            }
+            break;
+        }
         case OpCode::OP_SET_MEMBER: {
             uint16_t nameIdx = read16(frame.ip);
             std::string memberName = frame.closure->function->chunk.constants[nameIdx].str;
@@ -3138,12 +3552,10 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                runtimeError("'/' only supports numbers!");
-                return false;
+                return runtimeError("'/' only supports numbers!");
             }
             if (b.asFloat() == 0.0) {
-                runtimeError("Division by zero!");
-                return false;
+                return runtimeError("Division by zero!");
             }
             if (a.isInt() && b.isInt()) {
                 if (a.intVal == std::numeric_limits<int64_t>::min() && b.intVal == -1) {
@@ -3295,6 +3707,21 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         }
         case OpCode::OP_RETURN: {
             Value result = cloneStructValue(pop());
+
+            if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+                ExceptionHandler handler = tryHandlers.back();
+                tryHandlers.pop_back();
+
+                pendingControlFlow.kind = PendingKind::RETURN;
+                pendingControlFlow.value = result;
+
+                size_t targetDepth = std::min(stack.size(), handler.stackDepth);
+                closeUpvalues(targetDepth);
+                stack.resize(targetDepth);
+                frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
+                break;
+            }
+
             closeUpvalues(frame.slotsOffset);
             size_t slotsOffset = frame.slotsOffset;
             bool wasGrab = frame.isGrab;
@@ -3326,36 +3753,6 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
     return true;
 }
 
-void VM::runtimeError(const std::string& message) {
-    std::cout << "[Runtime Error]: " << message << std::endl;
-    for (int i = static_cast<int>(frames.size()) - 1; i >= 0; i--) {
-        CallFrame& frame = frames[i];
-        FunctionPtr function = frame.closure->function;
-        size_t instruction = frame.ip - function->chunk.code.data() - 1;
-        int line = function->chunk.getLine(instruction);
-        int column = function->chunk.getColumn(instruction);
-        std::string fnName = function->name.empty() ? "<script>" : function->name;
-
-        std::cout << "  at " << fnName << "() [line " << line << ", col " << column << "]" << std::endl;
-
-        if (!function->chunk.source.empty()) {
-            std::string lineStr = Lexer(function->chunk.source).getLineString(line);
-            if (!lineStr.empty()) {
-                std::cout << "    " << lineStr << std::endl;
-                std::cout << "    ";
-                int col = column > 1 ? column - 1 : 0;
-                for (int c = 0; c < col; c++) {
-                    if (c < static_cast<int>(lineStr.size()) && lineStr[c] == '\t') {
-                        std::cout << "\t";
-                    } else {
-                        std::cout << " ";
-                    }
-                }
-                std::cout << "^" << std::endl;
-            }
-        }
-    }
-}
 
 bool VM::run(Chunk& mainChunk, const std::string& scriptPath) {
     resetStack();

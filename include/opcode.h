@@ -60,5 +60,14 @@ enum class OpCode : uint8_t {
     OP_GREATER_EQUAL,
     OP_LESS_EQUAL,
     OP_MAKE_CONST,
-    OP_RETURN
+    OP_RETURN,
+    OP_BUILD_RANGE,
+    OP_ITER_INIT,
+    OP_ITER_NEXT,
+    OP_PUSH_TRY,
+    OP_POP_TRY,
+    OP_DROP,
+    OP_END_FINALLY,
+    OP_HALT,
+    OP_SKIP
 };

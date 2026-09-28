@@ -12,6 +12,28 @@ struct CallFrame {
     bool isGrab = false;
 };
 
+struct ExceptionHandler {
+    uint16_t catchIP = 0xffff;
+    uint16_t finallyIP = 0xffff;
+    size_t frameIndex = 0;
+    size_t stackDepth = 0;
+};
+
+enum class PendingKind {
+    NONE,
+    RETURN,
+    DROP,
+    HALT,
+    SKIP,
+    RUNTIME_ERROR
+};
+
+struct PendingControlFlow {
+    PendingKind kind = PendingKind::NONE;
+    Value value;
+    int jumpIP = -1;
+};
+
 class VM {
 private:
     std::vector<Value> stack;
@@ -22,6 +44,19 @@ private:
     std::vector<std::string> loadingStackNames;
     UpvaluePtr openUpvalues = nullptr;
     ModulePtr rootModule = nullptr;
+
+    StructDefPtr mapEntryDef = nullptr;
+    StructDefPtr runtimeErrorDef = nullptr;
+    std::vector<ExceptionHandler> tryHandlers;
+    PendingControlFlow pendingControlFlow;
+
+    bool wasErrorUnwound = false;
+    bool uncaughtErrorPrinted = false;
+
+    Value makeRuntimeErrorObject(const std::string& message, const std::string& typeName = "Runtime Error");
+    bool unwindError(Value errorVal, bool isRuntimeError = false);
+    bool raiseRuntimeError(const std::string& message, const std::string& typeName = "Runtime Error");
+    bool runtimeError(const std::string& message, const std::string& typeName = "Runtime Error");
 
     void push(Value value);
     Value pop();
@@ -34,7 +69,6 @@ private:
     UpvaluePtr captureUpvalue(size_t stackIndex);
     void closeUpvalues(size_t lastSlotIndex);
     ModulePtr loadModule(const std::string& modulePathStr, const std::string& requesterPath, ClosurePtr& outClosure, bool& isNew);
-    void runtimeError(const std::string& message);
 
 public:
     VM();
