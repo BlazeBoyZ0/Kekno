@@ -1837,6 +1837,116 @@ static void testV062CallableConsistency() {
         "echo [1, 2, 3].map(d.mult) ~\n";
     out = runCodeFresh(boundMethodCbCode, ok);
     TEST_ASSERT(ok && out.find("[10, 20, 30]") != std::string::npos, "bound method passed as callback to map()");
+
+    // Bound method with named arguments
+    std::string boundMethodNamedCode =
+        "build MathOp {\n"
+        "    pub let base : int ~\n"
+        "    pub task addMult(x, mult) { give (self.base + x) * mult ~ }\n"
+        "}~\n"
+        "let m = MathOp(5) ~\n"
+        "let fn = m.addMult ~\n"
+        "echo fn(mult=3, x=10) ~\n";
+    out = runCodeFresh(boundMethodNamedCode, ok);
+    TEST_ASSERT(ok && out.find("=> 45") != std::string::npos, "bound method called with named arguments");
+}
+
+static void testV063StabilizationSuite() {
+    bool ok = false;
+    std::string out;
+
+    // 1. catchable array/indexing errors
+    out = runCodeFresh("test { let arr = [1, 2] ~ echo arr[10] ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("out of bounds") != std::string::npos, "catchable OOB array index error");
+
+    out = runCodeFresh("test { let arr = [1, 2] ~ arr[5] = 99 ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("out of bounds") != std::string::npos, "catchable OOB array set index error");
+
+    out = runCodeFresh("test { let str = \"abc\" ~ echo str[10] ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("out of bounds") != std::string::npos, "catchable OOB string index error");
+
+    // 2. arithmetic and modulo errors
+    out = runCodeFresh("test { let x = 10 % 0 ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("Modulo by zero!") != std::string::npos, "catchable modulo by zero error");
+
+    out = runCodeFresh("test { let x = 9223372036854775807 + 1 ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("addition overflow") != std::string::npos, "catchable addition overflow error");
+
+    // 3. type/runtime operation errors
+    out = runCodeFresh("test { let int x = \"str\" ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("Type mismatch") != std::string::npos, "catchable type mismatch error");
+
+    // 4. invalid calls and variable/named calls
+    out = runCodeFresh("test { let x = 42 ~ x() ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("Can only call task values") != std::string::npos, "catchable direct non-callable error");
+
+    out = runCodeFresh("test { let x = 42 ~ let spread = [1] ~ x(spread...) ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("Can only call task values") != std::string::npos, "catchable variable call non-callable error");
+
+    // 5. errors from native functions
+    out = runCodeFresh("test { sqrt(-1) ~ } flinch (let err) { echo err.message ~ } ~", ok);
+    TEST_ASSERT(ok && out.find("negative number") != std::string::npos, "catchable native function error");
+
+    // 6. callbacks whose errors are caught by an outer flinch
+    std::string callbackCatchCode =
+        "test {\n"
+        "    [1, 2, 3].map(task(x) {\n"
+        "        if (x == 2) {\n"
+        "            let errVal = 10 / 0 ~\n"
+        "        }\n"
+        "        give x ~\n"
+        "    }) ~\n"
+        "} flinch (let err) {\n"
+        "    echo err.message ~\n"
+        "}~\n";
+    out = runCodeFresh(callbackCatchCode, ok);
+    TEST_ASSERT(ok && out.find("Division by zero!") != std::string::npos, "callback error reaches outer flinch");
+
+    // 7. runtime error inside atlast replacing pending flow
+    std::string atlastNewErrorCode =
+        "task testAtlastErr() {\n"
+        "    test {\n"
+        "        test {\n"
+        "            give 100 ~\n"
+        "        } atlast {\n"
+        "            let err = 1 / 0 ~\n"
+        "        }~\n"
+        "    } flinch (let err) {\n"
+        "        echo err.message ~\n"
+        "    }~\n"
+        "}\n"
+        "testAtlastErr() ~\n";
+    out = runCodeFresh(atlastNewErrorCode, ok);
+    TEST_ASSERT(ok && out.find("Division by zero!") != std::string::npos, "runtime error inside atlast replaces pending give");
+
+    // 8. INT64 boundary ranges and overflow/termination
+    out = runCodeFresh("let count = 0 ~ for (let i in 9223372036854775806 : 9223372036854775807) { count++ ~ } echo count ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "INT64_MAX boundary range single step");
+
+    out = runCodeFresh("let count = 0 ~ for (let i in 9223372036854775806 : 9223372036854775807 : 2) { count++ ~ } echo count ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "INT64_MAX boundary range step with overflow termination");
+
+    out = runCodeFresh("let count = 0 ~ for (let i in -9223372036854775807 : -9223372036854775808 : -2) { count++ ~ } echo count ~", ok);
+    TEST_ASSERT(ok && out.find("=> 1") != std::string::npos, "INT64_MIN boundary range negative step with overflow termination");
+
+    // 9. useful runtime source locations and traceback behavior
+    std::string tbCode =
+        "task f3() {\n"
+        "    let x = 1 / 0 ~\n"
+        "}\n"
+        "task f2() {\n"
+        "    f3() ~\n"
+        "}\n"
+        "task f1() {\n"
+        "    f2() ~\n"
+        "}\n"
+        "f1() ~\n";
+    out = runCodeFresh(tbCode, ok);
+    TEST_ASSERT(ok && out.find("[Runtime Error]: Division by zero!") != std::string::npos &&
+                out.find("at f3()") != std::string::npos &&
+                out.find("at f2()") != std::string::npos &&
+                out.find("at f1()") != std::string::npos,
+                "useful traceback with exact line numbers");
 }
 
 int main() {
@@ -1872,6 +1982,7 @@ int main() {
     testV060StructsAndOperators();
     test_v061_patch_features();
     testDefaultPrivateMembers();
+    testV063StabilizationSuite();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;

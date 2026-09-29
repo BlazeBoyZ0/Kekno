@@ -162,6 +162,18 @@ struct ObjStructInstance {
 struct ObjIterator {
     std::vector<Value> items;
     size_t index = 0;
+
+    bool isRange = false;
+    bool isFloatRange = false;
+    bool rangeExhausted = false;
+
+    int64_t currentInt = 0;
+    int64_t endInt = 0;
+    int64_t stepInt = 0;
+
+    double currentFloat = 0.0;
+    double endFloat = 0.0;
+    double stepFloat = 0.0;
 };
 
 struct Value {
