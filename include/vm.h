@@ -13,6 +13,7 @@ struct CallFrame {
 };
 
 struct ExceptionHandler {
+    uint16_t tryStartIP = 0;
     uint16_t catchIP = 0xffff;
     uint16_t finallyIP = 0xffff;
     size_t frameIndex = 0;
@@ -32,6 +33,7 @@ struct PendingControlFlow {
     PendingKind kind = PendingKind::NONE;
     Value value;
     int jumpIP = -1;
+    size_t frameIndex = 0;
 };
 
 class VM {
@@ -48,7 +50,7 @@ private:
     StructDefPtr mapEntryDef = nullptr;
     StructDefPtr runtimeErrorDef = nullptr;
     std::vector<ExceptionHandler> tryHandlers;
-    PendingControlFlow pendingControlFlow;
+    std::vector<PendingControlFlow> pendingControlFlowStack;
 
     bool wasErrorUnwound = false;
     bool uncaughtErrorPrinted = false;
