@@ -559,7 +559,7 @@ static void testV050Features() {
     TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("expects type func") != std::string::npos, "func param type mismatch error");
 
     out = runCodeFresh("let x = 100~ x()~", ok);
-    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Cannot call value of type int") != std::string::npos, "call non-task error");
+    TEST_ASSERT(ok && out.find("[Runtime Error]") != std::string::npos && out.find("Can only call task values") != std::string::npos, "call non-task error");
 
     std::string adderCode =
         "task makeAdder(int x) {\n"

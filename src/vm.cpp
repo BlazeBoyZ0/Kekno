@@ -290,7 +290,7 @@ void VM::resetStack() {
     stack.clear();
     frames.clear();
     tryHandlers.clear();
-    pendingControlFlow = PendingControlFlow{};
+    pendingControlFlowStack.clear();
     openUpvalues = nullptr;
     moduleCache.clear();
     loadingStackPaths.clear();
@@ -374,8 +374,10 @@ bool VM::unwindError(Value errorVal, bool isRuntimeError) {
             targetFrame.ip = targetFrame.closure->function->chunk.code.data() + handler.catchIP;
             return true;
         } else if (handler.finallyIP != 0xffff) {
-            pendingControlFlow.kind = isRuntimeError ? PendingKind::RUNTIME_ERROR : PendingKind::DROP;
-            pendingControlFlow.value = errorVal;
+            PendingControlFlow flow;
+            flow.kind = isRuntimeError ? PendingKind::RUNTIME_ERROR : PendingKind::DROP;
+            flow.value = errorVal;
+            pendingControlFlowStack.push_back(flow);
             targetFrame.ip = targetFrame.closure->function->chunk.code.data() + handler.finallyIP;
             return true;
         }
@@ -1377,10 +1379,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value val = cloneValue(pop());
             if (isConst) val = makeConst(val);
             if (!checkAndCoerceValueType(expected, val, frame.closure->module)) {
-                std::cout << "[Runtime Error]: Type mismatch for global variable '" << name
-                          << "': expected " << expected.toString() << " but got "
-                          << val.getTypeSpec().toString() << "." << std::endl;
-                return false;
+                return raiseRuntimeError("Type mismatch for global variable '" + name
+                          + "': expected " + expected.toString() + " but got "
+                          + val.getTypeSpec().toString() + ".");
             }
             if (val.isFunction()) {
                 if (val.closure) val.closure->module = frame.closure->module;
@@ -1398,10 +1399,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             TypeSpec expected = parseTypeSpecString(frame.closure->function->chunk.constants[typeSpecIdx].str);
             Value val = peek(0);
             if (!checkAndCoerceValueType(expected, val, frame.closure->module)) {
-                std::cout << "[Runtime Error]: Type mismatch: expected "
-                          << expected.toString() << " but got "
-                          << val.getTypeSpec().toString() << "." << std::endl;
-                return false;
+                return raiseRuntimeError("Type mismatch: expected "
+                          + expected.toString() + " but got "
+                          + val.getTypeSpec().toString() + ".");
             }
             stack.back() = val;
             break;
@@ -1412,8 +1412,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             ModulePtr mod = frame.closure->module;
             auto it = mod->globals.find(name);
             if (it == mod->globals.end()) {
-                std::cout << "[Runtime Error]: Undefined variable '" << name << "'" << std::endl;
-                return false;
+                return raiseRuntimeError("Undefined variable '" + name + "'");
             }
             push(it->second);
             break;
@@ -1424,26 +1423,23 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             ModulePtr mod = frame.closure->module;
             auto it = mod->globals.find(name);
             if (it == mod->globals.end()) {
-                std::cout << "[Runtime Error]: Variable '" << name << "' is not defined." << std::endl;
-                return false;
+                return raiseRuntimeError("Variable '" + name + "' is not defined.");
             }
             auto symIt = mod->symbols.find(name);
             if (symIt != mod->symbols.end() && symIt->second.isConst) {
                 if (it->second.isModule()) {
-                    std::cout << "[Runtime Error]: Cannot reassign module alias '" << name << "'." << std::endl;
+                    return raiseRuntimeError("Cannot reassign module alias '" + name + "'.");
                 } else {
-                    std::cout << "[Runtime Error]: Cannot reassign constant variable '" << name << "'." << std::endl;
+                    return raiseRuntimeError("Cannot reassign constant variable '" + name + "'.");
                 }
-                return false;
             }
             if (symIt != mod->symbols.end() && symIt->second.typeSpec.kind != TypeKind::ANY && symIt->second.typeSpec.kind != TypeKind::UNTYPED) {
                 TypeSpec expected = symIt->second.typeSpec;
                 Value val = peek(0);
                 if (!checkAndCoerceValueType(expected, val, frame.closure->module)) {
-                    std::cout << "[Runtime Error]: Type mismatch for variable '" << name
-                              << "': expected " << expected.toString() << " but got "
-                              << val.getTypeSpec().toString() << "." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Type mismatch for variable '" + name
+                              + "': expected " + expected.toString() + " but got "
+                              + val.getTypeSpec().toString() + ".");
                 }
                 it->second = val;
             } else {
@@ -1463,10 +1459,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 TypeSpec expected = frame.closure->function->localTypes[slot];
                 if (expected.kind != TypeKind::ANY && expected.kind != TypeKind::UNTYPED) {
                     if (!checkAndCoerceValueType(expected, val, frame.closure->module)) {
-                        std::cout << "[Runtime Error]: Type mismatch for local variable: expected "
-                                  << expected.toString() << " but got "
-                                  << val.getTypeSpec().toString() << "." << std::endl;
-                        return false;
+                        return raiseRuntimeError("Type mismatch for local variable: expected "
+                                  + expected.toString() + " but got "
+                                  + val.getTypeSpec().toString() + ".");
                     }
                     stack[frame.slotsOffset + slot] = val;
                     break;
@@ -1486,10 +1481,9 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value val = cloneValue(peek(0));
             if (upvalue->typeSpec.kind != TypeKind::ANY && upvalue->typeSpec.kind != TypeKind::UNTYPED) {
                 if (!checkAndCoerceValueType(upvalue->typeSpec, val, frame.closure->module)) {
-                    std::cout << "[Runtime Error]: Type mismatch for variable: expected "
-                              << upvalue->typeSpec.toString() << " but got "
-                              << val.getTypeSpec().toString() << "." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Type mismatch for variable: expected "
+                              + upvalue->typeSpec.toString() + " but got "
+                              + val.getTypeSpec().toString() + ".");
                 }
             }
             *upvalue->getValuePtr(stack) = val;
@@ -1526,15 +1520,13 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (val.isInt()) {
                 int64_t res;
                 if (__builtin_add_overflow(val.intVal, 1, &res)) {
-                    std::cout << "[Runtime Error]: 64-bit integer addition overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer addition overflow.");
                 }
                 push(Value(res));
             } else if (val.isFloat()) {
                 push(Value(val.floatVal + 1.0));
             } else {
-                std::cout << "[Runtime Error]: '++' operand must be a number!" << std::endl;
-                return false;
+                return raiseRuntimeError("'++' operand must be a number!");
             }
             break;
         }
@@ -1543,15 +1535,13 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (val.isInt()) {
                 int64_t res;
                 if (__builtin_sub_overflow(val.intVal, 1, &res)) {
-                    std::cout << "[Runtime Error]: 64-bit integer subtraction overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer subtraction overflow.");
                 }
                 push(Value(res));
             } else if (val.isFloat()) {
                 push(Value(val.floatVal - 1.0));
             } else {
-                std::cout << "[Runtime Error]: '--' operand must be a number!" << std::endl;
-                return false;
+                return raiseRuntimeError("'--' operand must be a number!");
             }
             break;
         }
@@ -1622,7 +1612,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return raiseRuntimeError(msg);
                 }
             } else {
-                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
+                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
             }
             break;
         }
@@ -1713,7 +1703,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return raiseRuntimeError(msg);
                 }
             } else {
-                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
+                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
             }
             break;
         }
@@ -1726,7 +1716,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_SPREAD_ARG: {
             Value arrVal = pop();
             if (!arrVal.isArray() || !arrVal.array) {
-                return raiseRuntimeError("Spread operator requires an array.");
+                std::cout << "[Runtime Error]: Spread operator requires an array." << std::endl;
+                return false;
             }
             for (size_t i = 0; i < arrVal.array->size(); ++i) {
                 push((*arrVal.array)[i]);
@@ -1742,7 +1733,8 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 }
             }
             if (markerIdx == -1) {
-                return raiseRuntimeError("Invalid variable call stack.");
+                std::cout << "[Runtime Error]: Invalid variable call stack." << std::endl;
+                return false;
             }
             int totalArgCount = static_cast<int>(stack.size() - 1 - markerIdx);
             stack.erase(stack.begin() + markerIdx);
@@ -1759,12 +1751,11 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     stack.resize(stack.size() - totalArgCount - 1);
                     push(result);
                 } catch (const std::exception& ex) {
-                    std::string msg = ex.what();
-                    if (msg.rfind("[Runtime Error]: ", 0) == 0) msg = msg.substr(17);
-                    return raiseRuntimeError(msg);
+                    std::cout << ex.what() << std::endl;
+                    return false;
                 }
             } else {
-                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
+                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
             }
             break;
         }
@@ -1805,7 +1796,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     return raiseRuntimeError(msg);
                 }
             } else {
-                return raiseRuntimeError("Cannot call value of type " + callee.getTypeSpec().toString() + ".");
+                return raiseRuntimeError("Can only call task values (got type " + callee.getTypeSpec().toString() + ").");
             }
             break;
         }
@@ -2652,48 +2643,28 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 Value stepVal = slice->hasStep ? slice->step : Value(static_cast<int64_t>(1));
 
                 if (!startVal.isNumber() || !endVal.isNumber() || !stepVal.isNumber()) {
-                    raiseRuntimeError("Range start, end, and step must be numbers.");
-                    return false;
+                    return raiseRuntimeError("Range start, end, and step must be numbers.");
                 }
 
                 if (stepVal.asFloat() == 0.0) {
-                    raiseRuntimeError("Step cannot be zero.");
-                    return false;
+                    return raiseRuntimeError("Step cannot be zero.");
                 }
 
+                iter->isRange = true;
                 bool isFloatRange = startVal.isFloat() || endVal.isFloat() || stepVal.isFloat();
+                iter->isFloatRange = isFloatRange;
+
                 if (!isFloatRange) {
-                    int64_t start = startVal.intVal;
-                    int64_t end = endVal.intVal;
-                    int64_t step = stepVal.intVal;
-
-                    if (step > 0) {
-                        for (int64_t i = start; i < end; i += step) {
-                            iter->items.push_back(Value(i));
-                        }
-                    } else {
-                        for (int64_t i = start; i > end; i += step) {
-                            iter->items.push_back(Value(i));
-                        }
-                    }
+                    iter->intCurrent = startVal.intVal;
+                    iter->intEnd = endVal.intVal;
+                    iter->intStep = stepVal.intVal;
                 } else {
-                    double start = startVal.asFloat();
-                    double end = endVal.asFloat();
-                    double step = stepVal.asFloat();
-
-                    if (step > 0) {
-                        for (double f = start; f < end; f += step) {
-                            iter->items.push_back(Value(f));
-                        }
-                    } else {
-                        for (double f = start; f > end; f += step) {
-                            iter->items.push_back(Value(f));
-                        }
-                    }
+                    iter->floatCurrent = startVal.asFloat();
+                    iter->floatEnd = endVal.asFloat();
+                    iter->floatStep = stepVal.asFloat();
                 }
             } else {
-                raiseRuntimeError("Value of type '" + target.getTypeSpec().toString() + "' is not iterable.");
-                return false;
+                return raiseRuntimeError("Value of type '" + target.getTypeSpec().toString() + "' is not iterable.");
             }
 
             push(Value(iter));
@@ -2703,15 +2674,68 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             uint16_t jumpOffset = read16(frame.ip);
             Value iterVal = peek(0);
             if (!iterVal.isIterator() || !iterVal.iterator) {
-                raiseRuntimeError("Invalid iterator state.");
-                return false;
+                return raiseRuntimeError("Invalid iterator state.");
             }
             IteratorPtr iter = iterVal.iterator;
-            if (iter->index >= iter->items.size()) {
-                frame.ip += jumpOffset;
+
+            if (iter->isRange) {
+                bool hasMore = false;
+                Value nextVal;
+
+                if (!iter->isFloatRange) {
+                    int64_t cur = iter->intCurrent;
+                    int64_t end = iter->intEnd;
+                    int64_t step = iter->intStep;
+
+                    if (step > 0) {
+                        hasMore = (cur < end);
+                    } else {
+                        hasMore = (cur > end);
+                    }
+
+                    if (hasMore) {
+                        nextVal = Value(cur);
+                        int64_t nextCur;
+                        if (__builtin_add_overflow(cur, step, &nextCur)) {
+                            iter->intCurrent = end;
+                        } else {
+                            iter->intCurrent = nextCur;
+                        }
+                    }
+                } else {
+                    double cur = iter->floatCurrent;
+                    double end = iter->floatEnd;
+                    double step = iter->floatStep;
+
+                    if (step > 0.0) {
+                        hasMore = (cur < end);
+                    } else {
+                        hasMore = (cur > end);
+                    }
+
+                    if (hasMore) {
+                        nextVal = Value(cur);
+                        double nextCur = cur + step;
+                        if (nextCur == cur) {
+                            hasMore = false;
+                        } else {
+                            iter->floatCurrent = nextCur;
+                        }
+                    }
+                }
+
+                if (!hasMore) {
+                    frame.ip += jumpOffset;
+                } else {
+                    push(nextVal);
+                }
             } else {
-                Value nextItem = iter->items[iter->index++];
-                push(nextItem);
+                if (iter->index >= iter->items.size()) {
+                    frame.ip += jumpOffset;
+                } else {
+                    Value nextItem = iter->items[iter->index++];
+                    push(nextItem);
+                }
             }
             break;
         }
@@ -2740,70 +2764,96 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             break;
         }
         case OpCode::OP_HALT: {
-            if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+            uint16_t targetIP = read16(frame.ip);
+            bool intercepted = false;
+            while (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1) {
                 ExceptionHandler handler = tryHandlers.back();
                 tryHandlers.pop_back();
 
-                const uint8_t* codeStart = frame.closure->function->chunk.code.data();
-                const uint8_t* jumpIp = frame.ip; // points at OP_JUMP instruction following OP_HALT
-                int jumpTarget = -1;
-                if (*jumpIp == static_cast<uint8_t>(OpCode::OP_JUMP)) {
-                    uint16_t offset = (static_cast<uint16_t>(jumpIp[1]) << 8) | jumpIp[2];
-                    jumpTarget = static_cast<int>((jumpIp - codeStart) + 3 + offset);
+                if (handler.finallyIP != 0xffff) {
+                    PendingControlFlow flow;
+                    flow.kind = PendingKind::HALT;
+                    flow.jumpIP = static_cast<int>(targetIP);
+
+                    if (pendingControlFlowStack.empty()) {
+                        pendingControlFlowStack.push_back(flow);
+                    }
+
+                    size_t targetDepth = std::min(stack.size(), handler.stackDepth);
+                    closeUpvalues(targetDepth);
+                    stack.resize(targetDepth);
+                    frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
+                    intercepted = true;
+                    break;
                 }
-
-                pendingControlFlow.kind = PendingKind::HALT;
-                pendingControlFlow.jumpIP = jumpTarget;
-
-                size_t targetDepth = std::min(stack.size(), handler.stackDepth);
-                closeUpvalues(targetDepth);
-                stack.resize(targetDepth);
-                frame.ip = codeStart + handler.finallyIP;
+            }
+            if (intercepted) break;
+            if (!pendingControlFlowStack.empty()) {
+                break;
+            }
+            if (targetIP != 0xffff) {
+                frame.ip = frame.closure->function->chunk.code.data() + targetIP;
             }
             break;
         }
         case OpCode::OP_SKIP: {
-            if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+            uint16_t targetIP = read16(frame.ip);
+            bool intercepted = false;
+            while (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1) {
                 ExceptionHandler handler = tryHandlers.back();
                 tryHandlers.pop_back();
 
-                const uint8_t* codeStart = frame.closure->function->chunk.code.data();
-                const uint8_t* jumpIp = frame.ip; // points at OP_JUMP or OP_LOOP instruction following OP_SKIP
-                int jumpTarget = -1;
-                if (*jumpIp == static_cast<uint8_t>(OpCode::OP_JUMP)) {
-                    uint16_t offset = (static_cast<uint16_t>(jumpIp[1]) << 8) | jumpIp[2];
-                    jumpTarget = static_cast<int>((jumpIp - codeStart) + 3 + offset);
-                } else if (*jumpIp == static_cast<uint8_t>(OpCode::OP_LOOP)) {
-                    uint16_t offset = (static_cast<uint16_t>(jumpIp[1]) << 8) | jumpIp[2];
-                    jumpTarget = static_cast<int>((jumpIp - codeStart) + 3 - offset);
+                if (handler.finallyIP != 0xffff) {
+                    PendingControlFlow flow;
+                    flow.kind = PendingKind::SKIP;
+                    flow.jumpIP = static_cast<int>(targetIP);
+
+                    if (pendingControlFlowStack.empty()) {
+                        pendingControlFlowStack.push_back(flow);
+                    }
+
+                    size_t targetDepth = std::min(stack.size(), handler.stackDepth);
+                    closeUpvalues(targetDepth);
+                    stack.resize(targetDepth);
+                    frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
+                    intercepted = true;
+                    break;
                 }
-
-                pendingControlFlow.kind = PendingKind::SKIP;
-                pendingControlFlow.jumpIP = jumpTarget;
-
-                size_t targetDepth = std::min(stack.size(), handler.stackDepth);
-                closeUpvalues(targetDepth);
-                stack.resize(targetDepth);
-                frame.ip = codeStart + handler.finallyIP;
+            }
+            if (intercepted) break;
+            if (!pendingControlFlowStack.empty()) {
+                break;
+            }
+            if (targetIP != 0xffff) {
+                frame.ip = frame.closure->function->chunk.code.data() + targetIP;
             }
             break;
         }
         case OpCode::OP_END_FINALLY: {
-            if (pendingControlFlow.kind != PendingKind::NONE) {
-                PendingControlFlow flow = pendingControlFlow;
-                pendingControlFlow = PendingControlFlow{};
+            if (!pendingControlFlowStack.empty()) {
+                PendingControlFlow flow = pendingControlFlowStack.back();
+                pendingControlFlowStack.pop_back();
 
-                if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+                bool intercepted = false;
+                while (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1) {
                     ExceptionHandler handler = tryHandlers.back();
+
+                    if (handler.finallyIP != 0xffff) {
+                        tryHandlers.pop_back();
+                        pendingControlFlowStack.push_back(flow);
+
+                        closeUpvalues(handler.stackDepth);
+                        stack.resize(handler.stackDepth);
+                        frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
+                        intercepted = true;
+                        break;
+                    } else if (handler.catchIP != 0xffff && (flow.kind == PendingKind::DROP || flow.kind == PendingKind::RUNTIME_ERROR)) {
+                        break;
+                    }
                     tryHandlers.pop_back();
-
-                    pendingControlFlow = flow;
-
-                    closeUpvalues(handler.stackDepth);
-                    stack.resize(handler.stackDepth);
-                    frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
-                    break;
                 }
+
+                if (intercepted) break;
 
                 if (flow.kind == PendingKind::RETURN) {
                     push(flow.value);
@@ -2812,6 +2862,11 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                     ModulePtr frameMod = frame.closure->module;
                     closeUpvalues(slotsOffset);
                     frames.pop_back();
+
+                    while (!tryHandlers.empty() && tryHandlers.back().frameIndex >= frames.size()) {
+                        tryHandlers.pop_back();
+                    }
+
                     if (frames.empty()) {
                         pop();
                         if (!loadingStackPaths.empty()) {
@@ -2852,22 +2907,18 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (target.isStruct()) {
                 StructInstancePtr inst = target.structInstance;
                 if (!inst || !inst->def) {
-                    std::cout << "[Runtime Error]: Setting field on invalid struct instance." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Setting field on invalid struct instance.");
                 }
                 if (inst->isConst) {
-                    std::cout << "[Runtime Error]: Cannot mutate const struct instance." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Cannot mutate const struct instance.");
                 }
                 int fIdx = inst->def->findField(memberName);
                 if (fIdx == -1) {
-                    std::cout << "[Member Error]: Unknown field '" << memberName << "' in struct '" << inst->def->name << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Unknown field '" + memberName + "' in struct '" + inst->def->name + "'.", "Member Error");
                 }
                 const auto& fInfo = inst->def->fields[fIdx];
                 if (fInfo.isConst) {
-                    std::cout << "[Runtime Error]: Cannot assign to constant field '" << memberName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Cannot assign to constant field '" + memberName + "'.");
                 }
                 if (!fInfo.isPublic) {
                     bool allowed = false;
@@ -2878,14 +2929,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                         }
                     }
                     if (!allowed) {
-                        std::cout << "[Module Error]: Cannot access private field '" << memberName << "' of struct '" << inst->def->name << "'." << std::endl;
-                        return false;
+                        return raiseRuntimeError("Cannot access private field '" + memberName + "' of struct '" + inst->def->name + "'.", "Module Error");
                     }
                 }
                 if (!val.isNil()) {
                     if (!checkAndCoerceValueType(fInfo.typeSpec, val, inst->def->module ? inst->def->module : frame.closure->module)) {
-                        std::cout << "[Runtime Error]: Type mismatch for field '" << memberName << "': expected " << fInfo.typeSpec.toString() << " but got " << val.getTypeSpec().toString() << "." << std::endl;
-                        return false;
+                        return raiseRuntimeError("Type mismatch for field '" + memberName + "': expected " + fInfo.typeSpec.toString() + " but got " + val.getTypeSpec().toString() + ".");
                     }
                 }
                 inst->fields[memberName] = cloneValue(val);
@@ -2894,31 +2943,26 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             }
 
             if (!target.isModule() || !target.module) {
-                std::cout << "[Member Error]: Cannot set member '" << memberName << "' on non-module value." << std::endl;
-                return false;
+                return raiseRuntimeError("Cannot set member '" + memberName + "' on non-module value.", "Member Error");
             }
 
             ModulePtr mod = target.module;
             auto symIt = mod->symbols.find(memberName);
             if (symIt == mod->symbols.end()) {
-                std::cout << "[Member Error]: Member '" << memberName << "' does not exist in module '" << mod->name << "'." << std::endl;
-                return false;
+                return raiseRuntimeError("Member '" + memberName + "' does not exist in module '" + mod->name + "'.", "Member Error");
             }
 
             if (!symIt->second.isPublic && frame.closure->module != mod) {
-                std::cout << "[Module Error]: '" << memberName << "' is private in module '" << mod->name << "'." << std::endl;
-                return false;
+                return raiseRuntimeError("'" + memberName + "' is private in module '" + mod->name + "'.", "Module Error");
             }
 
             if (symIt->second.isConst) {
-                std::cout << "[Runtime Error]: Cannot reassign constant variable '" << memberName << "'." << std::endl;
-                return false;
+                return raiseRuntimeError("Cannot reassign constant variable '" + memberName + "'.");
             }
 
             if (symIt->second.typeSpec.kind != TypeKind::ANY && symIt->second.typeSpec.kind != TypeKind::UNTYPED) {
                 if (!checkAndCoerceValueType(symIt->second.typeSpec, val)) {
-                    std::cout << "[Runtime Error]: Type mismatch for member '" << memberName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Type mismatch for member '" + memberName + "'.");
                 }
             }
 
@@ -3303,8 +3347,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct() && hasOperatorOverload("==", a, false)) {
                 if (!callOperatorOverload("==", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '==' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '==' found for struct '" + aName + "'.");
                 }
                 break;
             }
@@ -3317,8 +3360,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct() && hasOperatorOverload("!=", a, false)) {
                 if (!callOperatorOverload("!=", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '!=' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '!=' found for struct '" + aName + "'.");
                 }
                 break;
             }
@@ -3331,14 +3373,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload(">", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '>' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '>' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '>' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'>' only supports numbers!");
             }
             if (a.isInt() && b.isInt()) {
                 push(Value(a.intVal > b.intVal));
@@ -3353,14 +3393,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload(">=", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '>=' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '>=' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '>=' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'>=' only supports numbers!");
             }
             if (a.isInt() && b.isInt()) {
                 push(Value(a.intVal >= b.intVal));
@@ -3375,14 +3413,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("<", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '<' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '<' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '<' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'<' only supports numbers!");
             }
             if (a.isInt() && b.isInt()) {
                 push(Value(a.intVal < b.intVal));
@@ -3397,14 +3433,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("<=", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '<=' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '<=' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '<=' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'<=' only supports numbers!");
             }
             if (a.isInt() && b.isInt()) {
                 push(Value(a.intVal <= b.intVal));
@@ -3418,22 +3452,19 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("-", a, Value(), true)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '-' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '-' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (a.isInt()) {
                 if (a.intVal == std::numeric_limits<int64_t>::min()) {
-                    std::cout << "[Runtime Error]: 64-bit integer negation overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer negation overflow.");
                 }
                 push(Value(-a.intVal));
             } else if (a.isFloat()) {
                 push(Value(-a.floatVal));
             } else {
-                std::cout << "[Runtime Error]: '-' operand must be a number." << std::endl;
-                return false;
+                return raiseRuntimeError("'-' operand must be a number.");
             }
             break;
         }
@@ -3442,16 +3473,14 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("+", a, Value(), true)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '+' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '+' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (a.isNumber()) {
                 push(a);
             } else {
-                std::cout << "[Runtime Error]: '+' operand must be a number." << std::endl;
-                return false;
+                return raiseRuntimeError("'+' operand must be a number.");
             }
             break;
         }
@@ -3461,8 +3490,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("+", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '+' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '+' found for struct '" + aName + "'.");
                 }
                 break;
             }
@@ -3471,15 +3499,13 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             } else if (a.isInt() && b.isInt()) {
                 int64_t res;
                 if (__builtin_add_overflow(a.intVal, b.intVal, &res)) {
-                    std::cout << "[Runtime Error]: 64-bit integer addition overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer addition overflow.");
                 }
                 push(Value(res));
             } else if (a.isNumber() && b.isNumber()) {
                 push(Value(a.asFloat() + b.asFloat()));
             } else {
-                std::cout << "[Runtime Error]: '+' operands must be numbers, strings, or chars." << std::endl;
-                return false;
+                return raiseRuntimeError("'+' operands must be numbers, strings, or chars.");
             }
             break;
         }
@@ -3489,20 +3515,17 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("-", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '-' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '-' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '-' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'-' only supports numbers!");
             }
             if (a.isInt() && b.isInt()) {
                 int64_t res;
                 if (__builtin_sub_overflow(a.intVal, b.intVal, &res)) {
-                    std::cout << "[Runtime Error]: 64-bit integer subtraction overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer subtraction overflow.");
                 }
                 push(Value(res));
             } else {
@@ -3516,20 +3539,17 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("*", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '*' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '*' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '*' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'*' only supports numbers!");
             }
             if (a.isInt() && b.isInt()) {
                 int64_t res;
                 if (__builtin_mul_overflow(a.intVal, b.intVal, &res)) {
-                    std::cout << "[Runtime Error]: 64-bit integer multiplication overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer multiplication overflow.");
                 }
                 push(Value(res));
             } else {
@@ -3543,8 +3563,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("/", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '/' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '/' found for struct '" + aName + "'.");
                 }
                 break;
             }
@@ -3556,8 +3575,7 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             }
             if (a.isInt() && b.isInt()) {
                 if (a.intVal == std::numeric_limits<int64_t>::min() && b.intVal == -1) {
-                    std::cout << "[Runtime Error]: 64-bit integer division overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer division overflow.");
                 }
                 if (a.intVal % b.intVal == 0) {
                     push(Value(a.intVal / b.intVal));
@@ -3575,23 +3593,19 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("%", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '%' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '%' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '%' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'%' only supports numbers!");
             }
             if (b.asFloat() == 0.0) {
-                std::cout << "[Runtime Error]: Modulo by zero!" << std::endl;
-                return false;
+                return raiseRuntimeError("Modulo by zero!");
             }
             if (a.isInt() && b.isInt()) {
                 if (a.intVal == std::numeric_limits<int64_t>::min() && b.intVal == -1) {
-                    std::cout << "[Runtime Error]: 64-bit integer modulo overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer modulo overflow.");
                 }
                 push(Value(a.intVal % b.intVal));
             } else {
@@ -3605,18 +3619,15 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             if (a.isStruct()) {
                 if (!callOperatorOverload("^", a, b, false)) {
                     std::string aName = (a.structInstance && a.structInstance->def) ? a.structInstance->def->name : "struct";
-                    std::cout << "[Runtime Error]: No matching operator overload '^' found for struct '" << aName << "'." << std::endl;
-                    return false;
+                    return raiseRuntimeError("No matching operator overload '^' found for struct '" + aName + "'.");
                 }
                 break;
             }
             if (!a.isNumber() || !b.isNumber()) {
-                std::cout << "[Runtime Error]: '^' only supports numbers!" << std::endl;
-                return false;
+                return raiseRuntimeError("'^' only supports numbers!");
             }
             if (a.asFloat() == 0.0 && b.asFloat() < 0.0) {
-                std::cout << "[Runtime Error]: Zero cannot be raised to a negative power." << std::endl;
-                return false;
+                return raiseRuntimeError("Zero cannot be raised to a negative power.");
             }
             if (a.isInt() && b.isInt() && b.intVal >= 0) {
                 bool overflow = false;
@@ -3641,15 +3652,13 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                 }
 
                 if (overflow) {
-                    std::cout << "[Runtime Error]: 64-bit integer power overflow." << std::endl;
-                    return false;
+                    return raiseRuntimeError("64-bit integer power overflow.");
                 }
                 push(Value(result));
             } else {
                 double powRes = std::pow(a.asFloat(), b.asFloat());
                 if (std::isinf(powRes) || std::isnan(powRes)) {
-                    std::cout << "[Runtime Error]: Floating point power overflow or invalid result." << std::endl;
-                    return false;
+                    return raiseRuntimeError("Floating point power overflow or invalid result.");
                 }
                 push(Value(powRes));
             }
@@ -3705,19 +3714,30 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
         case OpCode::OP_RETURN: {
             Value result = cloneStructValue(pop());
 
-            if (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1 && tryHandlers.back().finallyIP != 0xffff) {
+            bool intercepted = false;
+            while (!tryHandlers.empty() && tryHandlers.back().frameIndex == frames.size() - 1) {
                 ExceptionHandler handler = tryHandlers.back();
                 tryHandlers.pop_back();
 
-                pendingControlFlow.kind = PendingKind::RETURN;
-                pendingControlFlow.value = result;
+                if (handler.finallyIP != 0xffff) {
+                    PendingControlFlow flow;
+                    flow.kind = PendingKind::RETURN;
+                    flow.value = result;
 
-                size_t targetDepth = std::min(stack.size(), handler.stackDepth);
-                closeUpvalues(targetDepth);
-                stack.resize(targetDepth);
-                frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
-                break;
+                    if (pendingControlFlowStack.empty()) {
+                        pendingControlFlowStack.push_back(flow);
+                    }
+
+                    size_t targetDepth = std::min(stack.size(), handler.stackDepth);
+                    closeUpvalues(targetDepth);
+                    stack.resize(targetDepth);
+                    frame.ip = frame.closure->function->chunk.code.data() + handler.finallyIP;
+                    intercepted = true;
+                    break;
+                }
             }
+
+            if (intercepted) break;
 
             closeUpvalues(frame.slotsOffset);
             size_t slotsOffset = frame.slotsOffset;

@@ -48,7 +48,7 @@ private:
     StructDefPtr mapEntryDef = nullptr;
     StructDefPtr runtimeErrorDef = nullptr;
     std::vector<ExceptionHandler> tryHandlers;
-    PendingControlFlow pendingControlFlow;
+    std::vector<PendingControlFlow> pendingControlFlowStack;
 
     bool wasErrorUnwound = false;
     bool uncaughtErrorPrinted = false;

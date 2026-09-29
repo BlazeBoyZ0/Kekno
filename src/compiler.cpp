@@ -1236,8 +1236,15 @@ void Compiler::whileStatement() {
     patchJump(exitJump);
     chunk().writeOp(OpCode::OP_POP);
 
-    for (int breakJump : loop.breakJumps) {
-        patchJump(breakJump);
+    uint16_t loopExitIP = static_cast<uint16_t>(chunk().code.size());
+    for (int breakOffset : loop.breakJumps) {
+        chunk().code[breakOffset] = static_cast<uint8_t>((loopExitIP >> 8) & 0xff);
+        chunk().code[breakOffset + 1] = static_cast<uint8_t>(loopExitIP & 0xff);
+    }
+    for (int cOffset : loop.continueJumps) {
+        uint16_t cIP = static_cast<uint16_t>(loop.continueIP);
+        chunk().code[cOffset] = static_cast<uint8_t>((cIP >> 8) & 0xff);
+        chunk().code[cOffset + 1] = static_cast<uint8_t>(cIP & 0xff);
     }
 }
 
@@ -1259,8 +1266,9 @@ void Compiler::haltStatement() {
     }
 
     chunk().writeOp(OpCode::OP_HALT);
-    int breakJump = emitJump(OpCode::OP_JUMP);
-    currentLoop->breakJumps.push_back(breakJump);
+    int breakOffset = static_cast<int>(chunk().code.size());
+    chunk().write16(0xffff);
+    currentLoop->breakJumps.push_back(breakOffset);
 }
 
 void Compiler::skipStatement() {
@@ -1281,11 +1289,12 @@ void Compiler::skipStatement() {
     }
 
     chunk().writeOp(OpCode::OP_SKIP);
+    int continueOffset = static_cast<int>(chunk().code.size());
     if (currentLoop->continueIP != -1) {
-        emitLoop(currentLoop->continueIP);
+        chunk().write16(static_cast<uint16_t>(currentLoop->continueIP));
     } else {
-        int continueJump = emitJump(OpCode::OP_JUMP);
-        currentLoop->continueJumps.push_back(continueJump);
+        chunk().write16(0xffff);
+        currentLoop->continueJumps.push_back(continueOffset);
     }
 }
 
@@ -1737,12 +1746,16 @@ void Compiler::statement() {
 
         patchJump(exitJump);
 
-        for (int breakJump : loop.breakJumps) {
-            patchJump(breakJump);
+        uint16_t loopExitIP = static_cast<uint16_t>(chunk().code.size());
+        for (int breakOffset : loop.breakJumps) {
+            chunk().code[breakOffset] = static_cast<uint8_t>((loopExitIP >> 8) & 0xff);
+            chunk().code[breakOffset + 1] = static_cast<uint8_t>(loopExitIP & 0xff);
         }
 
-        for (int cJump : loop.continueJumps) {
-            patchJump(cJump);
+        for (int cOffset : loop.continueJumps) {
+            uint16_t cIP = static_cast<uint16_t>(loop.continueIP);
+            chunk().code[cOffset] = static_cast<uint8_t>((cIP >> 8) & 0xff);
+            chunk().code[cOffset + 1] = static_cast<uint8_t>(cIP & 0xff);
         }
 
         endScope(); // outer loop scope ended: pops itemName and $iter
@@ -1789,7 +1802,7 @@ void Compiler::statement() {
                     advance();
                 }
                 if (match(TokenType::COLON)) {
-                    parseTypeDeclaration();
+                    error("Typed flinch catch variables are not supported.", "Compiler Error");
                 }
                 consume(TokenType::RPAREN, "Expected ')' after flinch error variable");
             }
