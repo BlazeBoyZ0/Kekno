@@ -1130,6 +1130,7 @@ VM::VM() {
             case ValueType::MODULE: return Value(std::string("module"));
             case ValueType::NIL: return Value(std::string("nil"));
             case ValueType::SLICE: return Value(std::string("slice"));
+            case ValueType::RANGE: return Value(std::string("range"));
             case ValueType::STRUCT: return Value(val.structInstance && val.structInstance->def ? val.structInstance->def->name : std::string("struct"));
             case ValueType::BOUND_METHOD: return Value(std::string("func"));
             case ValueType::STRUCT_DEF: return Value(std::string("struct_def"));
@@ -2707,15 +2708,12 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
             Value endVal = pop();
             Value startVal = pop();
 
-            SlicePtr slice = std::make_shared<ObjSlice>();
-            slice->start = startVal;
-            slice->end = endVal;
-            slice->step = stepVal;
-            slice->hasStart = true;
-            slice->hasEnd = true;
-            slice->hasStep = true;
+            RangePtr rangeObj = std::make_shared<ObjRange>();
+            rangeObj->start = startVal;
+            rangeObj->end = endVal;
+            rangeObj->step = stepVal;
 
-            push(Value(slice));
+            push(Value(rangeObj));
             break;
         }
         case OpCode::OP_ITER_INIT: {
@@ -2740,6 +2738,43 @@ bool VM::executeInstruction(OpCode instruction, CallFrame& frame) {
                         entryInst->fields["key"] = k;
                         entryInst->fields["value"] = v;
                         iter->items.push_back(Value(entryInst));
+                    }
+                }
+            } else if (target.isRange()) {
+                RangePtr rangeObj = target.range;
+                Value startVal = rangeObj->start;
+                Value endVal = rangeObj->end;
+                Value stepVal = rangeObj->step;
+
+                if (!startVal.isNumber() || !endVal.isNumber() || !stepVal.isNumber()) {
+                    return raiseRuntimeError("Range start, end, and step must be numbers.");
+                }
+
+                if (stepVal.asFloat() == 0.0) {
+                    return raiseRuntimeError("Step cannot be zero.");
+                }
+
+                iter->isRange = true;
+                bool isFloatRange = startVal.isFloat() || endVal.isFloat() || stepVal.isFloat();
+                iter->isFloatRange = isFloatRange;
+
+                if (!isFloatRange) {
+                    iter->currentInt = startVal.intVal;
+                    iter->endInt = endVal.intVal;
+                    iter->stepInt = stepVal.intVal;
+                    if (iter->stepInt > 0) {
+                        if (iter->currentInt >= iter->endInt) iter->rangeExhausted = true;
+                    } else {
+                        if (iter->currentInt <= iter->endInt) iter->rangeExhausted = true;
+                    }
+                } else {
+                    iter->currentFloat = startVal.asFloat();
+                    iter->endFloat = endVal.asFloat();
+                    iter->stepFloat = stepVal.asFloat();
+                    if (iter->stepFloat > 0.0) {
+                        if (iter->currentFloat >= iter->endFloat) iter->rangeExhausted = true;
+                    } else {
+                        if (iter->currentFloat <= iter->endFloat) iter->rangeExhausted = true;
                     }
                 }
             } else if (target.isSlice()) {

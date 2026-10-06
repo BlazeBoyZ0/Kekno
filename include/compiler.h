@@ -75,12 +75,19 @@ private:
     bool match(TokenType type);
     void consume(TokenType type, const std::string& errMsg);
     uint16_t addConstant(Value value);
-    void emitConstant(Value value);
+    void popBack();
+    void insertByte(size_t offset, uint8_t byte, int line, int column);
+    void emitByte(uint8_t byte, int line = -1, int column = -1);
+    void emit16(uint16_t value, int line = -1, int column = -1);
+    void emitOp(OpCode op, int line = -1, int column = -1);
+    void emitOp16(OpCode op, uint16_t arg, int line = -1, int column = -1);
+    void emitOpByte(OpCode op, uint8_t byte, int line = -1, int column = -1);
+    void emitConstant(Value value, int line = -1, int column = -1);
 
-    int emitJump(OpCode op);
+    int emitJump(OpCode op, int line = -1, int column = -1);
     void patchJump(int offset);
     void patchJumpTo(int offset, int targetIP);
-    void emitLoop(int loopStart);
+    void emitLoop(int loopStart, int line = -1, int column = -1);
 
     void beginScope();
     void endScope();
@@ -89,7 +96,7 @@ private:
     int resolveUpvalue(CompilerContext* context, const std::string& name);
     int addUpvalue(CompilerContext* context, uint16_t index, bool isLocal, const std::string& name, bool isConst, TypeSpec typeSpec);
 
-    uint16_t argumentList();
+    uint16_t argumentList(int callLine = -1, int callCol = -1);
     TypeSpec parseTypeDeclaration();
     void parseParameter(TypeSpec& outType, std::string& outName);
 
