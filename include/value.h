@@ -13,7 +13,7 @@
 #include <algorithm>
 #include "chunk.h"
 
-enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE, STRUCT, BOUND_METHOD, STRUCT_DEF, ITERATOR };
+enum class ValueType { INT, FLOAT, CHAR, STRING, BOOL, NIL, FUNCTION, ARRAY, MAP, NATIVE, MODULE, SLICE, RANGE, STRUCT, BOUND_METHOD, STRUCT_DEF, ITERATOR };
 
 enum class TypeKind {
     ANY, INT, FLOAT, CHAR, STRING, BOOL, ARRAY, MAP, UNTYPED, FUNC, STRUCT
@@ -56,6 +56,7 @@ struct ObjFunction;
 struct ObjClosure;
 struct ObjModule;
 struct ObjSlice;
+struct ObjRange;
 struct ObjStructDef;
 struct ObjStructInstance;
 struct ObjBoundMethod;
@@ -71,6 +72,7 @@ using FunctionPtr = std::shared_ptr<ObjFunction>;
 using ClosurePtr = std::shared_ptr<ObjClosure>;
 using ModulePtr = std::shared_ptr<ObjModule>;
 using SlicePtr = std::shared_ptr<ObjSlice>;
+using RangePtr = std::shared_ptr<ObjRange>;
 using NativeFn = std::function<Value(int argCount, Value* args, const std::vector<std::string>& argNames)>;
 
 struct SymbolInfo {
@@ -192,28 +194,30 @@ struct Value {
     NativeFn nativeFn;
     ModulePtr module;
     SlicePtr slice;
+    RangePtr range;
     StructDefPtr structDef;
     StructInstancePtr structInstance;
     BoundMethodPtr boundMethod;
     IteratorPtr iterator;
 
-    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr), iterator(nullptr) {}
-    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value() : type(ValueType::NIL), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr), iterator(nullptr) {}
+    Value(int64_t i) : type(ValueType::INT), intVal(i), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(double f) : type(ValueType::FLOAT), floatVal(f), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(char32_t c, bool /*isChar*/) : type(ValueType::CHAR), charVal(c), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(std::string s) : type(ValueType::STRING), intVal(0), str(s), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(bool b) : type(ValueType::BOOL), intVal(0), str(""), boolean(b), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
     Value(FunctionPtr fn);
     Value(ClosurePtr cl);
-    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(StructDefPtr def) : type(ValueType::STRUCT_DEF), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(def), structInstance(nullptr), boundMethod(nullptr) {}
-    Value(StructInstancePtr inst) : type(ValueType::STRUCT), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(inst), boundMethod(nullptr) {}
-    Value(BoundMethodPtr bm) : type(ValueType::BOUND_METHOD), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(bm), iterator(nullptr) {}
-    Value(IteratorPtr iter) : type(ValueType::ITERATOR), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr), iterator(iter) {}
+    Value(ArrayPtr arr) : type(ValueType::ARRAY), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(arr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(MapPtr m) : type(ValueType::MAP), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(m), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(NativeFn nfn) : type(ValueType::NATIVE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nfn), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(ModulePtr mod) : type(ValueType::MODULE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(mod), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(SlicePtr sl) : type(ValueType::SLICE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(sl), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(RangePtr r) : type(ValueType::RANGE), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(r), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(StructDefPtr def) : type(ValueType::STRUCT_DEF), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(def), structInstance(nullptr), boundMethod(nullptr) {}
+    Value(StructInstancePtr inst) : type(ValueType::STRUCT), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(inst), boundMethod(nullptr) {}
+    Value(BoundMethodPtr bm) : type(ValueType::BOUND_METHOD), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(bm), iterator(nullptr) {}
+    Value(IteratorPtr iter) : type(ValueType::ITERATOR), intVal(0), str(""), boolean(false), function(nullptr), closure(nullptr), array(nullptr), map(nullptr), nativeFn(nullptr), module(nullptr), slice(nullptr), range(nullptr), structDef(nullptr), structInstance(nullptr), boundMethod(nullptr), iterator(iter) {}
 
     bool isInt() const { return type == ValueType::INT; }
     bool isFloat() const { return type == ValueType::FLOAT; }
@@ -228,6 +232,7 @@ struct Value {
     bool isNative() const { return type == ValueType::NATIVE; }
     bool isModule() const { return type == ValueType::MODULE; }
     bool isSlice() const { return type == ValueType::SLICE; }
+    bool isRange() const { return type == ValueType::RANGE; }
     bool isStruct() const { return type == ValueType::STRUCT; }
     bool isStructDef() const { return type == ValueType::STRUCT_DEF; }
     bool isBoundMethod() const { return type == ValueType::BOUND_METHOD; }
@@ -257,6 +262,12 @@ struct ObjSlice {
     bool hasEnd = false;
     bool hasStep = false;
     bool isCallMarker = false;
+};
+
+struct ObjRange {
+    Value start;
+    Value end;
+    Value step;
 };
 
 struct MapKey {
@@ -608,6 +619,7 @@ inline bool Value::isEqualCycleSafe(const Value& other, std::vector<std::pair<co
         case ValueType::FUNCTION: return closure == other.closure;
         case ValueType::MODULE: return module == other.module;
         case ValueType::SLICE: return slice == other.slice;
+        case ValueType::RANGE: return range == other.range;
         case ValueType::STRUCT_DEF: return structDef == other.structDef;
         case ValueType::BOUND_METHOD: return boundMethod == other.boundMethod;
         case ValueType::ITERATOR: return iterator == other.iterator;

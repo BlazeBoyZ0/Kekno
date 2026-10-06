@@ -111,16 +111,64 @@ uint16_t Compiler::addConstant(Value value) {
     }
 }
 
-void Compiler::emitConstant(Value value) {
-    chunk().writeOp(OpCode::OP_CONSTANT, prev.line, prev.column);
-    uint16_t idx = addConstant(value);
-    chunk().write16(idx, prev.line, prev.column);
+void Compiler::popBack() {
+    chunk().code.pop_back();
+    if (!chunk().lines.empty()) chunk().lines.pop_back();
+    if (!chunk().columns.empty()) chunk().columns.pop_back();
 }
 
-int Compiler::emitJump(OpCode op) {
-    chunk().writeOp(op);
-    chunk().writeByte(0xff);
-    chunk().writeByte(0xff);
+void Compiler::insertByte(size_t offset, uint8_t byte, int line, int column) {
+    chunk().code.insert(chunk().code.begin() + offset, byte);
+    chunk().lines.insert(chunk().lines.begin() + offset, line);
+    chunk().columns.insert(chunk().columns.begin() + offset, column);
+}
+
+void Compiler::emitByte(uint8_t byte, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    chunk().writeByte(byte, line, column);
+}
+
+void Compiler::emit16(uint16_t value, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    chunk().write16(value, line, column);
+}
+
+void Compiler::emitOp(OpCode op, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    chunk().writeOp(op, line, column);
+}
+
+void Compiler::emitOp16(OpCode op, uint16_t arg, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    chunk().writeOp(op, line, column);
+    chunk().write16(arg, line, column);
+}
+
+void Compiler::emitOpByte(OpCode op, uint8_t byte, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    chunk().writeOp(op, line, column);
+    chunk().writeByte(byte, line, column);
+}
+
+void Compiler::emitConstant(Value value, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    uint16_t idx = addConstant(value);
+    chunk().writeOp(OpCode::OP_CONSTANT, line, column);
+    chunk().write16(idx, line, column);
+}
+
+int Compiler::emitJump(OpCode op, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    emitOp(op, line, column);
+    emitByte(0xff, line, column);
+    emitByte(0xff, line, column);
     return static_cast<int>(chunk().code.size() - 2);
 }
 
@@ -144,14 +192,16 @@ void Compiler::patchJumpTo(int offset, int targetIP) {
     chunk().code[offset + 1] = static_cast<uint8_t>(jump & 0xff);
 }
 
-void Compiler::emitLoop(int loopStart) {
-    chunk().writeOp(OpCode::OP_LOOP);
+void Compiler::emitLoop(int loopStart, int line, int column) {
+    if (line == -1) line = prev.line;
+    if (column == -1) column = prev.column;
+    emitOp(OpCode::OP_LOOP, line, column);
     int jump = static_cast<int>(chunk().code.size() - loopStart + 2);
     if (jump > 0xffff) {
         error("Loop body too large.", "Compiler Error");
         return;
     }
-    chunk().write16(static_cast<uint16_t>(jump));
+    emit16(static_cast<uint16_t>(jump), line, column);
 }
 
 void Compiler::beginScope() {
@@ -162,7 +212,7 @@ void Compiler::endScope() {
     currentContext->scopeDepth--;
     while (!currentContext->locals.empty() &&
            currentContext->locals.back().depth > currentContext->scopeDepth) {
-        chunk().writeOp(OpCode::OP_CLOSE_UPVALUE);
+        emitOp(OpCode::OP_CLOSE_UPVALUE);
         currentContext->locals.pop_back();
     }
 }
@@ -250,7 +300,10 @@ int Compiler::addUpvalue(CompilerContext* context, uint16_t index, bool isLocal,
     return count;
 }
 
-uint16_t Compiler::argumentList() {
+uint16_t Compiler::argumentList(int callLine, int callCol) {
+    if (callLine == -1) callLine = prev.line;
+    if (callCol == -1) callCol = prev.column;
+
     struct ArgInfo {
         bool isNamed = false;
         std::string name;
@@ -282,7 +335,7 @@ uint16_t Compiler::argumentList() {
 
             if (current.type == TokenType::COLON) {
                 isSliceArg = true;
-                chunk().writeOp(OpCode::OP_NIL); // omitted start
+                emitOp(OpCode::OP_NIL, callLine, callCol); // omitted start
             } else {
                 expression();
                 hasStart = true;
@@ -294,7 +347,7 @@ uint16_t Compiler::argumentList() {
                     expression();
                     hasEnd = true;
                 } else {
-                    chunk().writeOp(OpCode::OP_NIL); // omitted end
+                    emitOp(OpCode::OP_NIL, callLine, callCol); // omitted end
                 }
 
                 if (match(TokenType::COLON)) {
@@ -302,26 +355,26 @@ uint16_t Compiler::argumentList() {
                         expression();
                         hasStep = true;
                     } else {
-                        chunk().writeOp(OpCode::OP_NIL); // omitted step
+                        emitOp(OpCode::OP_NIL, callLine, callCol); // omitted step
                     }
                 } else {
-                    chunk().writeOp(OpCode::OP_NIL); // omitted step
+                    emitOp(OpCode::OP_NIL, callLine, callCol); // omitted step
                 }
             }
 
             if (isSliceArg) {
-                chunk().writeOp(OpCode::OP_BUILD_SLICE);
+                emitOp(OpCode::OP_BUILD_SLICE, callLine, callCol);
                 uint8_t flags = (hasStart ? 1 : 0) | (hasEnd ? 2 : 0) | (hasStep ? 4 : 0);
-                chunk().writeByte(flags);
+                emitByte(flags, callLine, callCol);
             }
 
             if (match(TokenType::DOT_DOT_DOT)) {
                 info.isSpread = true;
                 if (!hasSpread) {
                     hasSpread = true;
-                    chunk().code.insert(chunk().code.begin() + startOffset, static_cast<uint8_t>(OpCode::OP_BEGIN_CALL));
+                    insertByte(startOffset, static_cast<uint8_t>(OpCode::OP_BEGIN_CALL), callLine, callCol);
                 }
-                chunk().writeOp(OpCode::OP_SPREAD_ARG);
+                emitOp(OpCode::OP_SPREAD_ARG, callLine, callCol);
             }
 
             args.push_back(info);
@@ -337,26 +390,25 @@ uint16_t Compiler::argumentList() {
 
     if (!hasSpread) {
         if (namedCount == 0) {
-            chunk().writeOp(OpCode::OP_CALL);
-            chunk().write16(totalArgCount);
+            emitOp16(OpCode::OP_CALL, totalArgCount, callLine, callCol);
         } else {
-            chunk().writeOp(OpCode::OP_CALL_NAMED);
-            chunk().write16(totalArgCount);
-            chunk().write16(namedCount);
+            emitOp(OpCode::OP_CALL_NAMED, callLine, callCol);
+            emit16(totalArgCount, callLine, callCol);
+            emit16(namedCount, callLine, callCol);
             for (const auto& name : namedArgNames) {
                 uint16_t nameIdx = addConstant(Value(name));
-                chunk().write16(nameIdx);
+                emit16(nameIdx, callLine, callCol);
             }
         }
     } else {
         if (namedCount == 0) {
-            chunk().writeOp(OpCode::OP_CALL_VAR);
+            emitOp(OpCode::OP_CALL_VAR, callLine, callCol);
         } else {
-            chunk().writeOp(OpCode::OP_CALL_VAR_NAMED);
-            chunk().write16(namedCount);
+            emitOp(OpCode::OP_CALL_VAR_NAMED, callLine, callCol);
+            emit16(namedCount, callLine, callCol);
             for (const auto& name : namedArgNames) {
                 uint16_t nameIdx = addConstant(Value(name));
-                chunk().write16(nameIdx);
+                emit16(nameIdx, callLine, callCol);
             }
         }
     }
@@ -470,44 +522,44 @@ void Compiler::primary() {
         emitConstant(Value(current.strValue));
         advance();
     } else if (current.type == TokenType::TRUE) {
-        chunk().writeOp(OpCode::OP_TRUE);
+        emitOp(OpCode::OP_TRUE);
         advance();
     } else if (current.type == TokenType::FALSE) {
-        chunk().writeOp(OpCode::OP_FALSE);
+        emitOp(OpCode::OP_FALSE);
         advance();
     } else if (current.type == TokenType::NIL) {
-        chunk().writeOp(OpCode::OP_NIL);
+        emitOp(OpCode::OP_NIL);
         advance();
     } else if (current.type == TokenType::IDENTIFIER || current.type == TokenType::SELF) {
         std::string name = current.text;
         advance();
         int localSlot = resolveLocal(currentContext, name);
         if (localSlot != -1) {
-            chunk().writeOp(OpCode::OP_GET_LOCAL);
-            chunk().write16(static_cast<uint16_t>(localSlot));
+            emitOp(OpCode::OP_GET_LOCAL);
+            emit16(static_cast<uint16_t>(localSlot));
         } else {
             int upvalueSlot = resolveUpvalue(currentContext, name);
             if (upvalueSlot != -1) {
-                chunk().writeOp(OpCode::OP_GET_UPVALUE);
-                chunk().write16(static_cast<uint16_t>(upvalueSlot));
+                emitOp(OpCode::OP_GET_UPVALUE);
+                emit16(static_cast<uint16_t>(upvalueSlot));
             } else if (currentStructDef && currentStructDef->findField(name) != -1) {
                 // Direct field access inside method
                 int selfSlot = resolveLocal(currentContext, "self");
                 if (selfSlot != -1) {
-                    chunk().writeOp(OpCode::OP_GET_LOCAL);
-                    chunk().write16(static_cast<uint16_t>(selfSlot));
+                    emitOp(OpCode::OP_GET_LOCAL);
+                    emit16(static_cast<uint16_t>(selfSlot));
                     uint16_t memberIdx = addConstant(Value(name));
-                    chunk().writeOp(OpCode::OP_GET_MEMBER);
-                    chunk().write16(memberIdx);
+                    emitOp(OpCode::OP_GET_MEMBER);
+                    emit16(memberIdx);
                 } else {
                     uint16_t nameIdx = addConstant(Value(name));
-                    chunk().writeOp(OpCode::OP_GET_GLOBAL);
-                    chunk().write16(nameIdx);
+                    emitOp(OpCode::OP_GET_GLOBAL);
+                    emit16(nameIdx);
                 }
             } else {
                 uint16_t nameIdx = addConstant(Value(name));
-                chunk().writeOp(OpCode::OP_GET_GLOBAL);
-                chunk().write16(nameIdx);
+                emitOp(OpCode::OP_GET_GLOBAL);
+                emit16(nameIdx);
             }
         }
     } else if (current.type == TokenType::LPAREN) {
@@ -527,8 +579,8 @@ void Compiler::primary() {
             } while (match(TokenType::COMMA));
         }
         consume(TokenType::RBRACKET, "Expected ']' after array elements");
-        chunk().writeOp(OpCode::OP_BUILD_ARRAY);
-        chunk().write16(elementCount);
+        emitOp(OpCode::OP_BUILD_ARRAY);
+        emit16(elementCount);
     } else if (current.type == TokenType::LBRACE) {
         advance();
         uint16_t entryCount = 0;
@@ -544,8 +596,8 @@ void Compiler::primary() {
             } while (match(TokenType::COMMA));
         }
         consume(TokenType::RBRACE, "Expected '}' after map entries");
-        chunk().writeOp(OpCode::OP_BUILD_MAP);
-        chunk().write16(entryCount);
+        emitOp(OpCode::OP_BUILD_MAP);
+        emit16(entryCount);
     } else if (current.type == TokenType::TASK) {
         advance(); // consume 'task'
         std::string fnName = "";
@@ -617,8 +669,8 @@ void Compiler::primary() {
             }
             consume(TokenType::RBRACE, "Expected '}' after task body");
 
-            chunk().writeOp(OpCode::OP_NIL);
-            chunk().writeOp(OpCode::OP_RETURN);
+            emitOp(OpCode::OP_NIL);
+            emitOp(OpCode::OP_RETURN);
 
             fn->localTypes = fn->chunk.localTypes;
         }
@@ -626,12 +678,12 @@ void Compiler::primary() {
         if (hasError) return;
 
         uint16_t fnConstantIdx = addConstant(Value(fn));
-        chunk().writeOp(OpCode::OP_CLOSURE);
-        chunk().write16(fnConstantIdx);
+        emitOp(OpCode::OP_CLOSURE);
+        emit16(fnConstantIdx);
 
         for (size_t i = 0; i < fnContext.upvalues.size(); i++) {
-            chunk().writeByte(fnContext.upvalues[i].isLocal ? 1 : 0);
-            chunk().write16(fnContext.upvalues[i].index);
+            emitByte(fnContext.upvalues[i].isLocal ? 1 : 0);
+            emit16(fnContext.upvalues[i].index);
         }
     } else {
         errorAt(current, "Expected expression", "Syntax Error");
@@ -651,7 +703,7 @@ void Compiler::postfix() {
 
             if (current.type == TokenType::COLON) {
                 isSlice = true;
-                chunk().writeOp(OpCode::OP_NIL); // omitted start
+                emitOp(OpCode::OP_NIL); // omitted start
             } else {
                 expression();
                 hasStart = true;
@@ -663,7 +715,7 @@ void Compiler::postfix() {
                     expression();
                     hasEnd = true;
                 } else {
-                    chunk().writeOp(OpCode::OP_NIL); // omitted end
+                    emitOp(OpCode::OP_NIL); // omitted end
                 }
 
                 if (match(TokenType::COLON)) {
@@ -671,21 +723,21 @@ void Compiler::postfix() {
                         expression();
                         hasStep = true;
                     } else {
-                        chunk().writeOp(OpCode::OP_NIL); // omitted step
+                        emitOp(OpCode::OP_NIL); // omitted step
                     }
                 } else {
-                    chunk().writeOp(OpCode::OP_NIL); // omitted step
+                    emitOp(OpCode::OP_NIL); // omitted step
                 }
             }
 
             consume(TokenType::RBRACKET, "Expected ']' after index or slice");
 
             if (isSlice) {
-                chunk().writeOp(OpCode::OP_BUILD_SLICE);
+                emitOp(OpCode::OP_BUILD_SLICE);
                 uint8_t flags = (hasStart ? 1 : 0) | (hasEnd ? 2 : 0) | (hasStep ? 4 : 0);
-                chunk().writeByte(flags);
+                emitByte(flags);
             }
-            chunk().writeOp(OpCode::OP_GET_INDEX);
+            emitOp(OpCode::OP_GET_INDEX);
         } else if (match(TokenType::DOT)) {
             if (current.type != TokenType::IDENTIFIER &&
                 current.type != TokenType::TYPE_INT &&
@@ -702,67 +754,67 @@ void Compiler::postfix() {
             std::string memberName = current.text;
             advance();
             uint16_t nameIdx = addConstant(Value(memberName));
-            chunk().writeOp(OpCode::OP_GET_MEMBER);
-            chunk().write16(nameIdx);
+            emitOp(OpCode::OP_GET_MEMBER);
+            emit16(nameIdx);
         } else if (match(TokenType::PLUS_PLUS) || match(TokenType::MINUS_MINUS)) {
             OpCode incOp = (prev.type == TokenType::PLUS_PLUS) ? OpCode::OP_INC : OpCode::OP_DEC;
             std::string opStr = (prev.type == TokenType::PLUS_PLUS) ? "++" : "--";
 
             if (!chunk().code.empty() && static_cast<OpCode>(chunk().code.back()) == OpCode::OP_GET_INDEX) {
-                chunk().code.pop_back(); // remove OP_GET_INDEX
-                chunk().writeOp(OpCode::OP_DUP_2);
-                chunk().writeOp(OpCode::OP_GET_INDEX);
-                chunk().writeOp(incOp);
-                chunk().writeOp(OpCode::OP_SET_INDEX_POST);
+                popBack(); // remove OP_GET_INDEX
+                emitOp(OpCode::OP_DUP_2);
+                emitOp(OpCode::OP_GET_INDEX);
+                emitOp(incOp);
+                emitOp(OpCode::OP_SET_INDEX_POST);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_MEMBER) {
                 uint16_t memberIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
-                chunk().writeOp(OpCode::OP_DUP);
-                chunk().writeOp(OpCode::OP_GET_MEMBER);
-                chunk().write16(memberIdx);
-                chunk().writeOp(incOp);
-                chunk().writeOp(OpCode::OP_SET_MEMBER_POST);
-                chunk().write16(memberIdx);
+                popBack(); popBack(); popBack();
+                emitOp(OpCode::OP_DUP);
+                emitOp(OpCode::OP_GET_MEMBER);
+                emit16(memberIdx);
+                emitOp(incOp);
+                emitOp(OpCode::OP_SET_MEMBER_POST);
+                emit16(memberIdx);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
                 uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
                 if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].isConst) {
                     error("Cannot reassign constant variable '" + currentContext->locals[localSlot].name + "'.", "Compiler Error");
                 }
-                chunk().writeOp(OpCode::OP_GET_LOCAL);
-                chunk().write16(localSlot);
-                chunk().writeOp(OpCode::OP_DUP);
-                chunk().writeOp(incOp);
-                chunk().writeOp(OpCode::OP_SET_LOCAL);
-                chunk().write16(localSlot);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_GET_LOCAL);
+                emit16(localSlot);
+                emitOp(OpCode::OP_DUP);
+                emitOp(incOp);
+                emitOp(OpCode::OP_SET_LOCAL);
+                emit16(localSlot);
+                emitOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
                 uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
                 if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
                     error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
                 }
-                chunk().writeOp(OpCode::OP_GET_UPVALUE);
-                chunk().write16(upvalueSlot);
-                chunk().writeOp(OpCode::OP_DUP);
-                chunk().writeOp(incOp);
-                chunk().writeOp(OpCode::OP_SET_UPVALUE);
-                chunk().write16(upvalueSlot);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_GET_UPVALUE);
+                emit16(upvalueSlot);
+                emitOp(OpCode::OP_DUP);
+                emitOp(incOp);
+                emitOp(OpCode::OP_SET_UPVALUE);
+                emit16(upvalueSlot);
+                emitOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
                 uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
                 std::string varName = chunk().constants[nameIdx].str;
                 if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
                     error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
                 }
-                chunk().writeOp(OpCode::OP_GET_GLOBAL);
-                chunk().write16(nameIdx);
-                chunk().writeOp(OpCode::OP_DUP);
-                chunk().writeOp(incOp);
-                chunk().writeOp(OpCode::OP_SET_GLOBAL);
-                chunk().write16(nameIdx);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_GET_GLOBAL);
+                emit16(nameIdx);
+                emitOp(OpCode::OP_DUP);
+                emitOp(incOp);
+                emitOp(OpCode::OP_SET_GLOBAL);
+                emit16(nameIdx);
+                emitOp(OpCode::OP_POP);
             } else {
                 error("Invalid operand for '" + opStr + "'.", "Compiler Error");
             }
@@ -780,61 +832,61 @@ void Compiler::unary() {
         advance();
         postfix();
         if (!chunk().code.empty() && static_cast<OpCode>(chunk().code.back()) == OpCode::OP_GET_INDEX) {
-            chunk().code.pop_back();
-            chunk().writeOp(OpCode::OP_DUP_2);
-            chunk().writeOp(OpCode::OP_GET_INDEX);
-            chunk().writeOp(incOp);
-            chunk().writeOp(OpCode::OP_SET_INDEX);
+            popBack();
+            emitOp(OpCode::OP_DUP_2);
+            emitOp(OpCode::OP_GET_INDEX);
+            emitOp(incOp);
+            emitOp(OpCode::OP_SET_INDEX);
         } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_MEMBER) {
             uint16_t memberIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
-            chunk().writeOp(OpCode::OP_DUP);
-            chunk().writeOp(OpCode::OP_GET_MEMBER);
-            chunk().write16(memberIdx);
-            chunk().writeOp(incOp);
-            chunk().writeOp(OpCode::OP_SET_MEMBER);
-            chunk().write16(memberIdx);
+            popBack(); popBack(); popBack();
+            emitOp(OpCode::OP_DUP);
+            emitOp(OpCode::OP_GET_MEMBER);
+            emit16(memberIdx);
+            emitOp(incOp);
+            emitOp(OpCode::OP_SET_MEMBER);
+            emit16(memberIdx);
         } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
             uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+            popBack(); popBack(); popBack();
             if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].isConst) {
                 error("Cannot reassign constant variable '" + currentContext->locals[localSlot].name + "'.", "Compiler Error");
             }
-            chunk().writeOp(OpCode::OP_GET_LOCAL);
-            chunk().write16(localSlot);
-            chunk().writeOp(incOp);
-            chunk().writeOp(OpCode::OP_SET_LOCAL);
-            chunk().write16(localSlot);
+            emitOp(OpCode::OP_GET_LOCAL);
+            emit16(localSlot);
+            emitOp(incOp);
+            emitOp(OpCode::OP_SET_LOCAL);
+            emit16(localSlot);
         } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
             uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+            popBack(); popBack(); popBack();
             if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
                 error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
             }
-            chunk().writeOp(OpCode::OP_GET_UPVALUE);
-            chunk().write16(upvalueSlot);
-            chunk().writeOp(incOp);
-            chunk().writeOp(OpCode::OP_SET_UPVALUE);
-            chunk().write16(upvalueSlot);
+            emitOp(OpCode::OP_GET_UPVALUE);
+            emit16(upvalueSlot);
+            emitOp(incOp);
+            emitOp(OpCode::OP_SET_UPVALUE);
+            emit16(upvalueSlot);
         } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
             uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-            chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+            popBack(); popBack(); popBack();
             std::string varName = chunk().constants[nameIdx].str;
             if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
                 error("Cannot reassign constant variable '" + varName + "'.", "Compiler Error");
             }
-            chunk().writeOp(OpCode::OP_GET_GLOBAL);
-            chunk().write16(nameIdx);
-            chunk().writeOp(incOp);
-            chunk().writeOp(OpCode::OP_SET_GLOBAL);
-            chunk().write16(nameIdx);
+            emitOp(OpCode::OP_GET_GLOBAL);
+            emit16(nameIdx);
+            emitOp(incOp);
+            emitOp(OpCode::OP_SET_GLOBAL);
+            emit16(nameIdx);
         } else {
             error("Invalid operand for '" + opStr + "'.", "Compiler Error");
         }
     } else if (current.type == TokenType::BANG || current.type == TokenType::NOT) {
         advance();
         unary();
-        chunk().writeOp(OpCode::OP_NOT);
+        emitOp(OpCode::OP_NOT);
     } else if (current.type == TokenType::MINUS) {
         advance();
         if (current.type == TokenType::INT_LITERAL && current.text == "9223372036854775808") {
@@ -843,11 +895,11 @@ void Compiler::unary() {
             return;
         }
         unary();
-        chunk().writeOp(OpCode::OP_UNARY_MINUS);
+        emitOp(OpCode::OP_UNARY_MINUS);
     } else if (current.type == TokenType::PLUS) {
         advance();
         unary();
-        chunk().writeOp(OpCode::OP_UNARY_PLUS);
+        emitOp(OpCode::OP_UNARY_PLUS);
     } else {
         postfix();
     }
@@ -859,7 +911,7 @@ void Compiler::power() {
     if (current.type == TokenType::CARET) {
         advance();
         power();
-        chunk().writeOp(OpCode::OP_POWER);
+        emitOp(OpCode::OP_POWER);
     }
 }
 
@@ -870,9 +922,9 @@ void Compiler::factor() {
         TokenType op = current.type;
         advance();
         power();
-        if (op == TokenType::STAR) chunk().writeOp(OpCode::OP_MULTIPLY);
-        else if (op == TokenType::SLASH) chunk().writeOp(OpCode::OP_DIVIDE);
-        else chunk().writeOp(OpCode::OP_MODULO);
+        if (op == TokenType::STAR) emitOp(OpCode::OP_MULTIPLY);
+        else if (op == TokenType::SLASH) emitOp(OpCode::OP_DIVIDE);
+        else emitOp(OpCode::OP_MODULO);
     }
 }
 
@@ -883,8 +935,8 @@ void Compiler::term() {
         TokenType op = current.type;
         advance();
         factor();
-        if (op == TokenType::PLUS) chunk().writeOp(OpCode::OP_ADD);
-        else chunk().writeOp(OpCode::OP_SUBTRACT);
+        if (op == TokenType::PLUS) emitOp(OpCode::OP_ADD);
+        else emitOp(OpCode::OP_SUBTRACT);
     }
 }
 
@@ -897,13 +949,13 @@ void Compiler::relational() {
         advance();
         term();
         if (op == TokenType::GREATER) {
-            chunk().writeOp(OpCode::OP_GREATER);
+            emitOp(OpCode::OP_GREATER);
         } else if (op == TokenType::GREATER_EQUAL) {
-            chunk().writeOp(OpCode::OP_GREATER_EQUAL);
+            emitOp(OpCode::OP_GREATER_EQUAL);
         } else if (op == TokenType::LESS) {
-            chunk().writeOp(OpCode::OP_LESS);
+            emitOp(OpCode::OP_LESS);
         } else if (op == TokenType::LESS_EQUAL) {
-            chunk().writeOp(OpCode::OP_LESS_EQUAL);
+            emitOp(OpCode::OP_LESS_EQUAL);
         }
     }
 }
@@ -916,9 +968,9 @@ void Compiler::equality() {
         advance();
         relational();
         if (op == TokenType::EQUAL_EQUAL) {
-            chunk().writeOp(OpCode::OP_EQUAL);
+            emitOp(OpCode::OP_EQUAL);
         } else {
-            chunk().writeOp(OpCode::OP_NOT_EQUAL);
+            emitOp(OpCode::OP_NOT_EQUAL);
         }
     }
 }
@@ -929,7 +981,7 @@ void Compiler::andExpression() {
     while (current.type == TokenType::AND) {
         advance();
         int endJump = emitJump(OpCode::OP_JUMP_IF_FALSE);
-        chunk().writeOp(OpCode::OP_POP);
+        emitOp(OpCode::OP_POP);
         equality();
         patchJump(endJump);
     }
@@ -943,7 +995,7 @@ void Compiler::orExpression() {
         int elseJump = emitJump(OpCode::OP_JUMP_IF_FALSE);
         int endJump = emitJump(OpCode::OP_JUMP);
         patchJump(elseJump);
-        chunk().writeOp(OpCode::OP_POP);
+        emitOp(OpCode::OP_POP);
         andExpression();
         patchJump(endJump);
     }
@@ -1001,16 +1053,16 @@ void Compiler::varDeclaration(bool isPublic) {
     consume(TokenType::EQUAL, "Expected '=' after variable name");
     expression();
     if (isConst) {
-        chunk().writeOp(OpCode::OP_MAKE_CONST);
+        emitOp(OpCode::OP_MAKE_CONST);
     }
     consume(TokenType::TILDE, "Every statement must end with '~'");
 
     if (currentContext->scopeDepth > 0) {
         addLocal(varName, isConst, typeSpec);
         if (typeSpec.kind != TypeKind::ANY && typeSpec.kind != TypeKind::UNTYPED) {
-            chunk().writeOp(OpCode::OP_CHECK_LOCAL_TYPE);
+            emitOp(OpCode::OP_CHECK_LOCAL_TYPE);
             uint16_t typeSpecIdx = addConstant(Value(typeSpec.toString()));
-            chunk().write16(typeSpecIdx);
+            emit16(typeSpecIdx);
         }
     } else {
         if (isConst) {
@@ -1019,15 +1071,15 @@ void Compiler::varDeclaration(bool isPublic) {
         uint16_t nameIdx = addConstant(Value(varName));
         uint8_t flags = (isPublic ? 1 : 0) | (isConst ? 2 : 0);
         if (typeSpec.kind != TypeKind::ANY && typeSpec.kind != TypeKind::UNTYPED) {
-            chunk().writeOp(OpCode::OP_DEFINE_GLOBAL_TYPED);
-            chunk().write16(nameIdx);
+            emitOp(OpCode::OP_DEFINE_GLOBAL_TYPED);
+            emit16(nameIdx);
             uint16_t typeSpecIdx = addConstant(Value(typeSpec.toString()));
-            chunk().write16(typeSpecIdx);
-            chunk().writeByte(flags);
+            emit16(typeSpecIdx);
+            emitByte(flags);
         } else {
-            chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
-            chunk().write16(nameIdx);
-            chunk().writeByte(flags);
+            emitOp(OpCode::OP_DEFINE_GLOBAL);
+            emit16(nameIdx);
+            emitByte(flags);
         }
     }
 }
@@ -1110,8 +1162,8 @@ void Compiler::taskDeclaration(bool isPublic) {
         consume(TokenType::RBRACE, "Expected '}' after task body");
 
         // Implicit default return nil
-        chunk().writeOp(OpCode::OP_NIL);
-        chunk().writeOp(OpCode::OP_RETURN);
+        emitOp(OpCode::OP_NIL);
+        emitOp(OpCode::OP_RETURN);
 
         fn->localTypes = fn->chunk.localTypes;
     }
@@ -1119,20 +1171,20 @@ void Compiler::taskDeclaration(bool isPublic) {
     if (hasError) return;
 
     uint16_t fnConstantIdx = addConstant(Value(fn));
-    chunk().writeOp(OpCode::OP_CLOSURE);
-    chunk().write16(fnConstantIdx);
+    emitOp(OpCode::OP_CLOSURE);
+    emit16(fnConstantIdx);
 
     for (size_t i = 0; i < fnContext.upvalues.size(); i++) {
-        chunk().writeByte(fnContext.upvalues[i].isLocal ? 1 : 0);
-        chunk().write16(fnContext.upvalues[i].index);
+        emitByte(fnContext.upvalues[i].isLocal ? 1 : 0);
+        emit16(fnContext.upvalues[i].index);
     }
 
     if (currentContext->scopeDepth == 0) {
         uint16_t nameIdx = addConstant(Value(fnName));
         uint8_t flags = isPublic ? 1 : 0;
-        chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
-        chunk().write16(nameIdx);
-        chunk().writeByte(flags);
+        emitOp(OpCode::OP_DEFINE_GLOBAL);
+        emit16(nameIdx);
+        emitByte(flags);
     }
 }
 
@@ -1144,12 +1196,12 @@ void Compiler::giveStatement() {
     }
 
     if (current.type == TokenType::TILDE) {
-        chunk().writeOp(OpCode::OP_NIL);
+        emitOp(OpCode::OP_NIL);
     } else {
         expression();
     }
     consume(TokenType::TILDE, "Every statement must end with '~'");
-    chunk().writeOp(OpCode::OP_RETURN);
+    emitOp(OpCode::OP_RETURN);
 }
 
 void Compiler::blockStatement() {
@@ -1169,7 +1221,7 @@ void Compiler::ifStatement() {
     consume(TokenType::RPAREN, "Expected ')' after condition");
 
     int thenJump = emitJump(OpCode::OP_JUMP_IF_FALSE);
-    chunk().writeOp(OpCode::OP_POP);
+    emitOp(OpCode::OP_POP);
 
     statement();
 
@@ -1177,7 +1229,7 @@ void Compiler::ifStatement() {
     elseJumps.push_back(emitJump(OpCode::OP_JUMP));
 
     patchJump(thenJump);
-    chunk().writeOp(OpCode::OP_POP);
+    emitOp(OpCode::OP_POP);
 
     // Support native else if chain
     while (match(TokenType::ELSE)) {
@@ -1187,14 +1239,14 @@ void Compiler::ifStatement() {
             consume(TokenType::RPAREN, "Expected ')' after condition");
 
             int nextJump = emitJump(OpCode::OP_JUMP_IF_FALSE);
-            chunk().writeOp(OpCode::OP_POP);
+            emitOp(OpCode::OP_POP);
 
             statement();
 
             elseJumps.push_back(emitJump(OpCode::OP_JUMP));
 
             patchJump(nextJump);
-            chunk().writeOp(OpCode::OP_POP);
+            emitOp(OpCode::OP_POP);
         } else {
             statement();
             break;
@@ -1227,14 +1279,14 @@ void Compiler::whileStatement() {
     consume(TokenType::RPAREN, "Expected ')' after condition");
 
     int exitJump = emitJump(OpCode::OP_JUMP_IF_FALSE);
-    chunk().writeOp(OpCode::OP_POP);
+    emitOp(OpCode::OP_POP);
 
     statement();
 
     emitLoop(loop.startIP);
 
     patchJump(exitJump);
-    chunk().writeOp(OpCode::OP_POP);
+    emitOp(OpCode::OP_POP);
 
     for (int breakJump : loop.breakJumps) {
         patchJump(breakJump);
@@ -1252,13 +1304,13 @@ void Compiler::haltStatement() {
 
     for (int i = static_cast<int>(currentContext->locals.size()) - 1; i >= 0; i--) {
         if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
-            chunk().writeOp(OpCode::OP_CLOSE_UPVALUE);
+            emitOp(OpCode::OP_CLOSE_UPVALUE);
         } else {
             break;
         }
     }
 
-    chunk().writeOp(OpCode::OP_HALT);
+    emitOp(OpCode::OP_HALT);
     int breakJump = emitJump(OpCode::OP_JUMP);
     currentLoop->breakJumps.push_back(breakJump);
 }
@@ -1274,13 +1326,13 @@ void Compiler::skipStatement() {
 
     for (int i = static_cast<int>(currentContext->locals.size()) - 1; i >= 0; i--) {
         if (currentContext->locals[i].depth > currentLoop->scopeDepth) {
-            chunk().writeOp(OpCode::OP_CLOSE_UPVALUE);
+            emitOp(OpCode::OP_CLOSE_UPVALUE);
         } else {
             break;
         }
     }
 
-    chunk().writeOp(OpCode::OP_SKIP);
+    emitOp(OpCode::OP_SKIP);
     if (currentLoop->continueIP != -1) {
         emitLoop(currentLoop->continueIP);
     } else {
@@ -1324,9 +1376,9 @@ void Compiler::grabStatement() {
 
     uint16_t pathIdx = addConstant(Value(pathStr));
     uint16_t aliasIdx = addConstant(Value(alias));
-    chunk().writeOp(OpCode::OP_GRAB);
-    chunk().write16(pathIdx);
-    chunk().write16(aliasIdx);
+    emitOp(OpCode::OP_GRAB);
+    emit16(pathIdx);
+    emit16(aliasIdx);
 }
 
 void Compiler::buildDeclaration(bool isPublic) {
@@ -1480,8 +1532,8 @@ void Compiler::buildDeclaration(bool isPublic) {
                 }
                 consume(TokenType::RBRACE, "Expected '}' after method body.");
 
-                chunk().writeOp(OpCode::OP_NIL);
-                chunk().writeOp(OpCode::OP_RETURN);
+                emitOp(OpCode::OP_NIL);
+                emitOp(OpCode::OP_RETURN);
                 methodFn->localTypes = methodFn->chunk.localTypes;
             }
 
@@ -1585,8 +1637,8 @@ void Compiler::buildDeclaration(bool isPublic) {
                 }
                 consume(TokenType::RBRACE, "Expected '}' after operator body.");
 
-                chunk().writeOp(OpCode::OP_NIL);
-                chunk().writeOp(OpCode::OP_RETURN);
+                emitOp(OpCode::OP_NIL);
+                emitOp(OpCode::OP_RETURN);
                 opFn->localTypes = opFn->chunk.localTypes;
             }
 
@@ -1615,8 +1667,8 @@ void Compiler::buildDeclaration(bool isPublic) {
     currentStructDef = oldStructDef;
 
     uint16_t defConstantIdx = addConstant(Value(structDef));
-    chunk().writeOp(OpCode::OP_STRUCT_DEF);
-    chunk().write16(defConstantIdx);
+    emitOp(OpCode::OP_STRUCT_DEF);
+    emit16(defConstantIdx);
 
     TypeSpec sType;
     sType.kind = TypeKind::STRUCT;
@@ -1625,9 +1677,9 @@ void Compiler::buildDeclaration(bool isPublic) {
     if (currentContext->scopeDepth == 0) {
         uint16_t nameIdx = addConstant(Value(structName));
         uint8_t flags = isPublic ? 1 : 0;
-        chunk().writeOp(OpCode::OP_DEFINE_GLOBAL);
-        chunk().write16(nameIdx);
-        chunk().writeByte(flags);
+        emitOp(OpCode::OP_DEFINE_GLOBAL);
+        emit16(nameIdx);
+        emitByte(flags);
     } else {
         addLocal(structName, false, sType);
     }
@@ -1670,7 +1722,7 @@ void Compiler::statement() {
         advance();
         expression();
         consume(TokenType::TILDE, "Every statement must end with '~'");
-        chunk().writeOp(OpCode::OP_PRINT);
+        emitOp(OpCode::OP_PRINT);
     } else if (current.type == TokenType::IF) {
         ifStatement();
     } else if (current.type == TokenType::WHILE) {
@@ -1700,12 +1752,12 @@ void Compiler::statement() {
             } else {
                 emitConstant(Value(static_cast<int64_t>(1))); // default step 1
             }
-            chunk().writeOp(OpCode::OP_BUILD_RANGE);
+            emitOp(OpCode::OP_BUILD_RANGE);
         }
 
         consume(TokenType::RPAREN, "Expected ')' after for clauses");
 
-        chunk().writeOp(OpCode::OP_ITER_INIT);
+        emitOp(OpCode::OP_ITER_INIT);
 
         // Hidden local slot for iterator
         addLocal("$iter", false, TypeSpec{TypeKind::ANY});
@@ -1750,15 +1802,15 @@ void Compiler::statement() {
         advance(); // consume 'drop'
         expression();
         consume(TokenType::TILDE, "Every statement must end with '~'");
-        chunk().writeOp(OpCode::OP_DROP);
+        emitOp(OpCode::OP_DROP);
     } else if (current.type == TokenType::TEST) {
         advance(); // consume 'test'
 
-        chunk().writeOp(OpCode::OP_PUSH_TRY);
+        emitOp(OpCode::OP_PUSH_TRY);
         int tryHeaderOffset = static_cast<int>(chunk().code.size());
         // Write 4 bytes: 16-bit catchIP and 16-bit finallyIP placeholders
-        chunk().write16(0xffff);
-        chunk().write16(0xffff);
+        emit16(0xffff);
+        emit16(0xffff);
 
         beginScope();
         consume(TokenType::LBRACE, "Expected '{' before test block body");
@@ -1768,7 +1820,7 @@ void Compiler::statement() {
         consume(TokenType::RBRACE, "Expected '}' after test block body");
         endScope();
 
-        chunk().writeOp(OpCode::OP_POP_TRY);
+        emitOp(OpCode::OP_POP_TRY);
 
         int jumpTestEnd = emitJump(OpCode::OP_JUMP);
 
@@ -1823,7 +1875,7 @@ void Compiler::statement() {
             consume(TokenType::RBRACE, "Expected '}' after atlast block body");
             endScope();
 
-            chunk().writeOp(OpCode::OP_END_FINALLY);
+            emitOp(OpCode::OP_END_FINALLY);
         }
 
         if (!hasFlinch && !hasAtLast) {
@@ -1859,25 +1911,25 @@ void Compiler::statement() {
             advance();
 
             if (!chunk().code.empty() && static_cast<OpCode>(chunk().code.back()) == OpCode::OP_GET_INDEX) {
-                chunk().code.pop_back(); // remove OP_GET_INDEX
+                popBack(); // remove OP_GET_INDEX
                 if (assignOp != TokenType::EQUAL) {
-                    chunk().writeOp(OpCode::OP_DUP_2);
-                    chunk().writeOp(OpCode::OP_GET_INDEX);
+                    emitOp(OpCode::OP_DUP_2);
+                    emitOp(OpCode::OP_GET_INDEX);
                     expression();
-                    if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                    else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                    else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                    else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                    else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                    if (assignOp == TokenType::PLUS_EQUAL) emitOp(OpCode::OP_ADD);
+                    else if (assignOp == TokenType::MINUS_EQUAL) emitOp(OpCode::OP_SUBTRACT);
+                    else if (assignOp == TokenType::STAR_EQUAL) emitOp(OpCode::OP_MULTIPLY);
+                    else if (assignOp == TokenType::SLASH_EQUAL) emitOp(OpCode::OP_DIVIDE);
+                    else if (assignOp == TokenType::PERCENT_EQUAL) emitOp(OpCode::OP_MODULO);
                 } else {
                     expression();
                 }
                 consume(TokenType::TILDE, "Every statement must end with '~'");
-                chunk().writeOp(OpCode::OP_SET_INDEX);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_SET_INDEX);
+                emitOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_MEMBER) {
                 uint16_t memberIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
 
                 // Check if base expression was a const variable
                 if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
@@ -1899,25 +1951,25 @@ void Compiler::statement() {
                 }
 
                 if (assignOp != TokenType::EQUAL) {
-                    chunk().writeOp(OpCode::OP_DUP);
-                    chunk().writeOp(OpCode::OP_GET_MEMBER);
-                    chunk().write16(memberIdx);
+                    emitOp(OpCode::OP_DUP);
+                    emitOp(OpCode::OP_GET_MEMBER);
+                    emit16(memberIdx);
                     expression();
-                    if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                    else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                    else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                    else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                    else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                    if (assignOp == TokenType::PLUS_EQUAL) emitOp(OpCode::OP_ADD);
+                    else if (assignOp == TokenType::MINUS_EQUAL) emitOp(OpCode::OP_SUBTRACT);
+                    else if (assignOp == TokenType::STAR_EQUAL) emitOp(OpCode::OP_MULTIPLY);
+                    else if (assignOp == TokenType::SLASH_EQUAL) emitOp(OpCode::OP_DIVIDE);
+                    else if (assignOp == TokenType::PERCENT_EQUAL) emitOp(OpCode::OP_MODULO);
                 } else {
                     expression();
                 }
                 consume(TokenType::TILDE, "Every statement must end with '~'");
-                chunk().writeOp(OpCode::OP_SET_MEMBER);
-                chunk().write16(memberIdx);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_SET_MEMBER);
+                emit16(memberIdx);
+                emitOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_LOCAL) {
                 uint16_t localSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
 
                 if (localSlot < currentContext->locals.size() && currentContext->locals[localSlot].name == "self") {
                     error("Cannot assign to 'self'.", "Compiler Error");
@@ -1927,48 +1979,48 @@ void Compiler::statement() {
                 }
 
                 if (assignOp != TokenType::EQUAL) {
-                    chunk().writeOp(OpCode::OP_GET_LOCAL);
-                    chunk().write16(localSlot);
+                    emitOp(OpCode::OP_GET_LOCAL);
+                    emit16(localSlot);
                     expression();
-                    if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                    else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                    else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                    else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                    else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                    if (assignOp == TokenType::PLUS_EQUAL) emitOp(OpCode::OP_ADD);
+                    else if (assignOp == TokenType::MINUS_EQUAL) emitOp(OpCode::OP_SUBTRACT);
+                    else if (assignOp == TokenType::STAR_EQUAL) emitOp(OpCode::OP_MULTIPLY);
+                    else if (assignOp == TokenType::SLASH_EQUAL) emitOp(OpCode::OP_DIVIDE);
+                    else if (assignOp == TokenType::PERCENT_EQUAL) emitOp(OpCode::OP_MODULO);
                 } else {
                     expression();
                 }
                 consume(TokenType::TILDE, "Every statement must end with '~'");
-                chunk().writeOp(OpCode::OP_SET_LOCAL);
-                chunk().write16(localSlot);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_SET_LOCAL);
+                emit16(localSlot);
+                emitOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_UPVALUE) {
                 uint16_t upvalueSlot = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
 
                 if (upvalueSlot < currentContext->upvalues.size() && currentContext->upvalues[upvalueSlot].isConst) {
                     error("Cannot reassign constant variable '" + currentContext->upvalues[upvalueSlot].name + "'.", "Compiler Error");
                 }
 
                 if (assignOp != TokenType::EQUAL) {
-                    chunk().writeOp(OpCode::OP_GET_UPVALUE);
-                    chunk().write16(upvalueSlot);
+                    emitOp(OpCode::OP_GET_UPVALUE);
+                    emit16(upvalueSlot);
                     expression();
-                    if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                    else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                    else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                    else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                    else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                    if (assignOp == TokenType::PLUS_EQUAL) emitOp(OpCode::OP_ADD);
+                    else if (assignOp == TokenType::MINUS_EQUAL) emitOp(OpCode::OP_SUBTRACT);
+                    else if (assignOp == TokenType::STAR_EQUAL) emitOp(OpCode::OP_MULTIPLY);
+                    else if (assignOp == TokenType::SLASH_EQUAL) emitOp(OpCode::OP_DIVIDE);
+                    else if (assignOp == TokenType::PERCENT_EQUAL) emitOp(OpCode::OP_MODULO);
                 } else {
                     expression();
                 }
                 consume(TokenType::TILDE, "Every statement must end with '~'");
-                chunk().writeOp(OpCode::OP_SET_UPVALUE);
-                chunk().write16(upvalueSlot);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_SET_UPVALUE);
+                emit16(upvalueSlot);
+                emitOp(OpCode::OP_POP);
             } else if (chunk().code.size() >= 3 && static_cast<OpCode>(chunk().code[chunk().code.size() - 3]) == OpCode::OP_GET_GLOBAL) {
                 uint16_t nameIdx = (static_cast<uint16_t>(chunk().code[chunk().code.size() - 2]) << 8) | chunk().code.back();
-                chunk().code.pop_back(); chunk().code.pop_back(); chunk().code.pop_back();
+                popBack(); popBack(); popBack();
 
                 std::string varName = chunk().constants[nameIdx].str;
                 if (globalConsts.find(varName) != globalConsts.end() && globalConsts[varName]) {
@@ -1976,27 +2028,27 @@ void Compiler::statement() {
                 }
 
                 if (assignOp != TokenType::EQUAL) {
-                    chunk().writeOp(OpCode::OP_GET_GLOBAL);
-                    chunk().write16(nameIdx);
+                    emitOp(OpCode::OP_GET_GLOBAL);
+                    emit16(nameIdx);
                     expression();
-                    if (assignOp == TokenType::PLUS_EQUAL) chunk().writeOp(OpCode::OP_ADD);
-                    else if (assignOp == TokenType::MINUS_EQUAL) chunk().writeOp(OpCode::OP_SUBTRACT);
-                    else if (assignOp == TokenType::STAR_EQUAL) chunk().writeOp(OpCode::OP_MULTIPLY);
-                    else if (assignOp == TokenType::SLASH_EQUAL) chunk().writeOp(OpCode::OP_DIVIDE);
-                    else if (assignOp == TokenType::PERCENT_EQUAL) chunk().writeOp(OpCode::OP_MODULO);
+                    if (assignOp == TokenType::PLUS_EQUAL) emitOp(OpCode::OP_ADD);
+                    else if (assignOp == TokenType::MINUS_EQUAL) emitOp(OpCode::OP_SUBTRACT);
+                    else if (assignOp == TokenType::STAR_EQUAL) emitOp(OpCode::OP_MULTIPLY);
+                    else if (assignOp == TokenType::SLASH_EQUAL) emitOp(OpCode::OP_DIVIDE);
+                    else if (assignOp == TokenType::PERCENT_EQUAL) emitOp(OpCode::OP_MODULO);
                 } else {
                     expression();
                 }
                 consume(TokenType::TILDE, "Every statement must end with '~'");
-                chunk().writeOp(OpCode::OP_SET_GLOBAL);
-                chunk().write16(nameIdx);
-                chunk().writeOp(OpCode::OP_POP);
+                emitOp(OpCode::OP_SET_GLOBAL);
+                emit16(nameIdx);
+                emitOp(OpCode::OP_POP);
             } else {
                 errorAt(prev, "Invalid assignment target.", "Syntax Error");
             }
         } else {
             consume(TokenType::TILDE, "Every statement must end with '~'");
-            chunk().writeOp(OpCode::OP_POP);
+            emitOp(OpCode::OP_POP);
         }
     }
 }
@@ -2009,7 +2061,7 @@ bool Compiler::compile() {
     while (current.type != TokenType::END_OF_FILE && !hasError) {
         statement();
     }
-    chunk().writeOp(OpCode::OP_RETURN);
+    emitOp(OpCode::OP_RETURN);
 
     return !hasError;
 }

@@ -1949,6 +1949,111 @@ static void testV063StabilizationSuite() {
                 "useful traceback with exact line numbers");
 }
 
+static void testSourceLocationAndRangeHardening() {
+    bool ok = false;
+    std::string out;
+
+    // 1. Non-first line function error source location
+    std::string errLineCode =
+        "task foo() {\n"
+        "    let a = 10~\n"
+        "    let b = 0~\n"
+        "    let c = a / b~\n"
+        "}\n"
+        "foo()~\n";
+    out = runCodeFresh(errLineCode, ok);
+    TEST_ASSERT(ok && out.find("at foo() [line 4") != std::string::npos &&
+                out.find("at main() [line 6") != std::string::npos,
+                "runtime error on line 4 reports exact line in function traceback");
+
+    // 2. Multi-level nested call traceback retain exact call sites
+    std::string nestedCode =
+        "task f3() {\n"
+        "    let arr = [1, 2]~\n"
+        "    let v = arr[100]~\n"
+        "}\n"
+        "task f2() {\n"
+        "    f3()~\n"
+        "}\n"
+        "task f1() {\n"
+        "    f2()~\n"
+        "}\n"
+        "f1()~\n";
+    out = runCodeFresh(nestedCode, ok);
+    TEST_ASSERT(ok && out.find("at f3() [line 3") != std::string::npos &&
+                out.find("at f2() [line 6") != std::string::npos &&
+                out.find("at f1() [line 9") != std::string::npos &&
+                out.find("at main() [line 11") != std::string::npos,
+                "nested call traceback retains exact call sites for all frames");
+
+    // 3. Error inside closure / higher-order callback
+    std::string cbCode =
+        "task mainTask() {\n"
+        "    let nums = [10, 0, 5]~\n"
+        "    nums.map(task(x) {\n"
+        "        give 100 / x~\n"
+        "    })~\n"
+        "}\n"
+        "mainTask()~\n";
+    out = runCodeFresh(cbCode, ok);
+    TEST_ASSERT(ok && out.find("[line 4") != std::string::npos &&
+                out.find("at mainTask() [line 3") != std::string::npos,
+                "callback runtime error retains exact closure and call site line locations");
+
+    // 4. Error inside loop body on non-first line
+    std::string loopErrCode =
+        "task loopTask() {\n"
+        "    for (let i in 0:5:1) {\n"
+        "        if (i == 3) {\n"
+        "            let bad = 10 / 0~\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "loopTask()~\n";
+    out = runCodeFresh(loopErrCode, ok);
+    TEST_ASSERT(ok && out.find("at loopTask() [line 4") != std::string::npos,
+                "error inside loop body retains exact line location");
+
+    // 5. ObjRange lazy large range iteration without collection allocation
+    std::string rangeCode =
+        "let count = 0~\n"
+        "for (let i in 0:1000000000:1) {\n"
+        "    count = count + 1~\n"
+        "    if (count == 5) { halt~ }\n"
+        "}\n"
+        "echo count~\n";
+    out = runCodeFresh(rangeCode, ok);
+    TEST_ASSERT(ok && out.find("=> 5") != std::string::npos, "lazy ObjRange range iteration fast and correct");
+
+    // 6. ObjRange INT64 boundary range iteration
+    std::string bRangeCode =
+        "let count = 0~\n"
+        "for (let i in 9223372036854775800:9223372036854775805:1) {\n"
+        "    count = count + 1~\n"
+        "}\n"
+        "echo count~\n";
+    out = runCodeFresh(bRangeCode, ok);
+    TEST_ASSERT(ok && out.find("=> 5") != std::string::npos, "INT64 boundary ObjRange works correctly");
+
+    // 7. ObjRange zero step error
+    std::string zeroStepCode =
+        "test {\n"
+        "    for (let i in 0:10:0) { echo i~ }\n"
+        "} flinch (let err) {\n"
+        "    echo err.message~\n"
+        "}~\n";
+    out = runCodeFresh(zeroStepCode, ok);
+    TEST_ASSERT(ok && out.find("Step cannot be zero.") != std::string::npos, "zero step ObjRange produces error");
+
+    // 8. Wrong direction range produces zero iterations
+    std::string wrongDirCode =
+        "let count = 0~\n"
+        "for (let i in 10:0:1) { count = count + 1~ }\n"
+        "echo count~\n";
+    out = runCodeFresh(wrongDirCode, ok);
+    TEST_ASSERT(ok && out.find("=> 0") != std::string::npos, "wrong-direction range produces zero iterations");
+}
+
 int main() {
     std::cout << "Running Kekno v0.6.2 Complete Test Suite..." << std::endl;
 
@@ -1983,6 +2088,7 @@ int main() {
     test_v061_patch_features();
     testDefaultPrivateMembers();
     testV063StabilizationSuite();
+    testSourceLocationAndRangeHardening();
 
     std::cout << "Tests Passed: " << g_testsPassed << std::endl;
     std::cout << "Tests Failed: " << g_testsFailed << std::endl;
